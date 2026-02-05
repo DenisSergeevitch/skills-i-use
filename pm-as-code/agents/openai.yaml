@@ -1,0 +1,4 @@
+interface:
+  display_name: "PM as Code"
+  short_description: "Enforce strict markdown project management workflows"
+  default_prompt: "Use $pm-as-code to initialize and maintain status.md as canonical project truth."
