@@ -16,17 +16,13 @@ Main file: `pm-as-code/SKILL.md`
 ## Install to Codex
 
 ```bash
-git clone https://github.com/DenisSergeevitch/skills-i-use.git /tmp/skills-i-use
-mkdir -p /Users/pro16/.codex/skills/
-cp -R /tmp/skills-i-use/pm-as-code /Users/pro16/.codex/skills/
+git clone https://github.com/DenisSergeevitch/skills-i-use.git /tmp/skills-i-use && mkdir -p /Users/pro16/.codex/skills/ && cp -R /tmp/skills-i-use/pm-as-code /Users/pro16/.codex/skills/
 ```
 
 ## Install to Claude
 
 ```bash
-git clone https://github.com/DenisSergeevitch/skills-i-use.git /tmp/skills-i-use
-mkdir -p /Users/pro16/.claude/skills/
-cp -R /tmp/skills-i-use/pm-as-code /Users/pro16/.claude/skills/
+git clone https://github.com/DenisSergeevitch/skills-i-use.git /tmp/skills-i-use && mkdir -p /Users/pro16/.claude/skills/ && cp -R /tmp/skills-i-use/pm-as-code /Users/pro16/.claude/skills/
 ```
 
 ## Update later
