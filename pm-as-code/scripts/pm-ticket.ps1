@@ -9,6 +9,7 @@ $TicketsFile = Join-Path $PMDir "tickets.tsv"
 $CriteriaFile = Join-Path $PMDir "criteria.tsv"
 $EvidenceFile = Join-Path $PMDir "evidence.tsv"
 $PulseFile = Join-Path $PMDir "pulse.log"
+$ClaimsFile = Join-Path $PMDir "claims.tsv"
 
 function Write-Usage {
     @'
@@ -113,11 +114,25 @@ function Load-Meta {
     }
     $script:NextTaskNum = 1
     $script:PulseTail = 30
+    $script:NextLimit = 20
+    $script:EvidenceTail = 50
     if ($meta.ContainsKey("NEXT_TASK_NUM")) {
         $script:NextTaskNum = [int]$meta["NEXT_TASK_NUM"]
     }
     if ($meta.ContainsKey("PULSE_TAIL")) {
         $script:PulseTail = [int]$meta["PULSE_TAIL"]
+    }
+    if ($meta.ContainsKey("NEXT_LIMIT")) {
+        $script:NextLimit = [int]$meta["NEXT_LIMIT"]
+    }
+    if ($meta.ContainsKey("EVIDENCE_TAIL")) {
+        $script:EvidenceTail = [int]$meta["EVIDENCE_TAIL"]
+    }
+    if ($script:NextLimit -lt 0) {
+        $script:NextLimit = 0
+    }
+    if ($script:EvidenceTail -lt 0) {
+        $script:EvidenceTail = 0
     }
 }
 
@@ -125,6 +140,8 @@ function Save-Meta {
     $body = @(
         "NEXT_TASK_NUM=$script:NextTaskNum"
         "PULSE_TAIL=$script:PulseTail"
+        "NEXT_LIMIT=$script:NextLimit"
+        "EVIDENCE_TAIL=$script:EvidenceTail"
     )
     Set-Content -LiteralPath $MetaFile -Value $body
 }
@@ -233,6 +250,30 @@ function Read-Evidence {
     return $rows
 }
 
+function Read-ClaimsMap {
+    $claims = @{}
+    if (-not (Test-Path -LiteralPath $ClaimsFile)) {
+        return $claims
+    }
+    $lines = Get-Content -LiteralPath $ClaimsFile
+    if ($lines.Count -le 1) {
+        return $claims
+    }
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -eq "") {
+            continue
+        }
+        $parts = $lines[$i].Split("`t", 4)
+        while ($parts.Count -lt 4) {
+            $parts += ""
+        }
+        if ($parts[0] -ne "") {
+            $claims[$parts[0]] = $parts[1]
+        }
+    }
+    return $claims
+}
+
 function Ticket-Exists([string]$TaskId) {
     $rows = Read-Tickets
     return ($rows | Where-Object { $_.id -eq $TaskId }).Count -gt 0
@@ -243,6 +284,8 @@ function Cmd-Init {
     if (-not (Test-Path -LiteralPath $MetaFile)) {
         $script:NextTaskNum = 1
         $script:PulseTail = 30
+        $script:NextLimit = 20
+        $script:EvidenceTail = 50
         Save-Meta
     }
     if (-not (Test-Path -LiteralPath $CoreFile)) {
@@ -378,18 +421,37 @@ function Cmd-List([string]$State = "") {
     }
 }
 
-function Render-StateSection([array]$Rows, [string]$State, [System.Collections.Generic.List[string]]$OutLines) {
+function Render-StateSection(
+    [array]$Rows,
+    [string]$State,
+    [int]$Limit,
+    [hashtable]$ClaimsByTask,
+    [System.Collections.Generic.List[string]]$OutLines
+) {
     $OutLines.Add("### $(State-Heading $State)")
-    $filtered = $Rows | Where-Object { $_.state -eq $State }
+    $filtered = @($Rows | Where-Object { $_.state -eq $State })
     if ($filtered.Count -eq 0) {
         $OutLines.Add("- (none)")
     } else {
-        foreach ($row in $filtered) {
+        $shown = $filtered
+        $hidden = 0
+        if ($Limit -gt 0 -and $filtered.Count -gt $Limit) {
+            $shown = @($filtered | Select-Object -First $Limit)
+            $hidden = $filtered.Count - $Limit
+        }
+        foreach ($row in $shown) {
             $dep = ""
             if ($row.deps -ne "") {
                 $dep = " (deps: $($row.deps))"
             }
-            $OutLines.Add("- [ ] $($row.id) - $($row.title)$dep")
+            $claim = ""
+            if ($State -ne "DONE" -and $ClaimsByTask.ContainsKey($row.id) -and $ClaimsByTask[$row.id] -ne "") {
+                $claim = " (claimed: $($ClaimsByTask[$row.id]))"
+            }
+            $OutLines.Add("- [ ] $($row.id) - $($row.title)$dep$claim")
+        }
+        if ($hidden -gt 0) {
+            $OutLines.Add("- ... +$hidden more (see .pm/tickets.tsv)")
         }
     }
     $OutLines.Add("")
@@ -401,6 +463,7 @@ function Cmd-Render([string]$OutPath = "status.md") {
     $tickets = Read-Tickets
     $criteria = Read-Criteria
     $evidence = Read-Evidence
+    $claimsByTask = Read-ClaimsMap
     $lines = [System.Collections.Generic.List[string]]::new()
 
     $lines.Add("# status.md")
@@ -434,10 +497,14 @@ function Cmd-Render([string]$OutPath = "status.md") {
     $lines.Add("")
     $lines.Add("## Current state (always keep accurate)")
     $lines.Add("")
-    Render-StateSection $tickets "NOW" $lines
-    Render-StateSection $tickets "IN_PROGRESS" $lines
-    Render-StateSection $tickets "BLOCKED" $lines
-    Render-StateSection $tickets "NEXT" $lines
+    Render-StateSection $tickets "NOW" 0 $claimsByTask $lines
+    Render-StateSection $tickets "IN_PROGRESS" 0 $claimsByTask $lines
+    Render-StateSection $tickets "BLOCKED" 0 $claimsByTask $lines
+    Render-StateSection $tickets "NEXT" $script:NextLimit $claimsByTask $lines
+    if ($script:NextLimit -gt 0) {
+        $lines.Add("> Next shows up to $script:NextLimit items; see .pm/tickets.tsv for full backlog")
+        $lines.Add("")
+    }
     $lines.Add("---")
     $lines.Add("")
     $lines.Add("## Acceptance criteria (required for active tasks)")
@@ -469,16 +536,28 @@ function Cmd-Render([string]$OutPath = "status.md") {
     $lines.Add("")
     $lines.Add("## Evidence index (keep it navigable)")
     $lines.Add("> Source of truth: .pm/evidence.tsv")
+    if ($script:EvidenceTail -gt 0) {
+        $lines.Add("> Showing latest $script:EvidenceTail entries to keep status.md compact")
+    }
     $lines.Add("")
     if ($evidence.Count -eq 0) {
         $lines.Add("- (none)")
     } else {
-        foreach ($ev in $evidence) {
+        $evidenceRows = @($evidence)
+        $omittedEvidence = 0
+        if ($script:EvidenceTail -gt 0 -and $evidence.Count -gt $script:EvidenceTail) {
+            $evidenceRows = @($evidence | Select-Object -Last $script:EvidenceTail)
+            $omittedEvidence = $evidence.Count - $script:EvidenceTail
+        }
+        foreach ($ev in $evidenceRows) {
             $note = ""
             if ($ev.note -ne "") {
                 $note = " - $($ev.note)"
             }
             $lines.Add("- $($ev.id): $($ev.location) ($($ev.date))$note")
+        }
+        if ($omittedEvidence -gt 0) {
+            $lines.Add("- ... +$omittedEvidence older entries (see .pm/evidence.tsv)")
         }
     }
     $lines.Add("")

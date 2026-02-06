@@ -8,6 +8,7 @@ TICKETS_FILE="$PM_DIR/tickets.tsv"
 CRITERIA_FILE="$PM_DIR/criteria.tsv"
 EVIDENCE_FILE="$PM_DIR/evidence.tsv"
 PULSE_FILE="$PM_DIR/pulse.log"
+CLAIMS_FILE="$PM_DIR/claims.tsv"
 
 usage() {
   cat <<'EOF'
@@ -88,12 +89,16 @@ load_meta() {
   source "$META_FILE"
   NEXT_TASK_NUM="${NEXT_TASK_NUM:-1}"
   PULSE_TAIL="${PULSE_TAIL:-30}"
+  NEXT_LIMIT="${NEXT_LIMIT:-20}"
+  EVIDENCE_TAIL="${EVIDENCE_TAIL:-50}"
 }
 
 save_meta() {
   cat >"$META_FILE" <<EOF
 NEXT_TASK_NUM=$NEXT_TASK_NUM
 PULSE_TAIL=$PULSE_TAIL
+NEXT_LIMIT=$NEXT_LIMIT
+EVIDENCE_TAIL=$EVIDENCE_TAIL
 EOF
 }
 
@@ -118,6 +123,8 @@ cmd_init() {
   if [[ ! -f "$META_FILE" ]]; then
     NEXT_TASK_NUM=1
     PULSE_TAIL=30
+    NEXT_LIMIT=20
+    EVIDENCE_TAIL=50
     save_meta
   fi
   if [[ ! -f "$CORE_FILE" ]]; then
@@ -297,19 +304,40 @@ cmd_list() {
 
 print_state_section() {
   local state="$1"
+  local limit="${2:-0}"
   local heading
   heading="$(state_heading "$state")"
   printf '### %s\n' "$heading"
-  awk -F'\t' -v st="$state" '
+  awk -F'\t' -v st="$state" -v lim="$limit" -v claims_path="$CLAIMS_FILE" '
+    BEGIN {
+      if (claims_path != "") {
+        while ((getline line < claims_path) > 0) {
+          if (line == "") continue
+          split(line, claim_parts, "\t")
+          if (claim_parts[1] == "id") continue
+          claims[claim_parts[1]] = claim_parts[2]
+        }
+        close(claims_path)
+      }
+    }
     NR == 1 { next }
     $2 == st {
+      total++
+      if (lim > 0 && total > lim) {
+        hidden++
+        next
+      }
       dep = ""
       if ($4 != "") dep = " (deps: " $4 ")"
-      printf "- [ ] %s - %s%s\n", $1, $3, dep
-      found = 1
+      claim = ""
+      if (($1 in claims) && claims[$1] != "" && $2 != "DONE") {
+        claim = " (claimed: " claims[$1] ")"
+      }
+      printf "- [ ] %s - %s%s%s\n", $1, $3, dep, claim
     }
     END {
-      if (!found) print "- (none)"
+      if (total == 0) print "- (none)"
+      if (hidden > 0) print "- ... +" hidden " more (see .pm/tickets.tsv)"
     }
   ' "$TICKETS_FILE"
   printf '\n'
@@ -341,19 +369,40 @@ print_acceptance_criteria() {
   done <<<"$active_ids"
 }
 
-print_evidence_index() {
+format_evidence_lines() {
   awk -F'\t' '
-    NR == 1 { next }
     {
       note = ""
       if ($4 != "") note = " - " $4
       printf "- %s: %s (%s)%s\n", $1, $3, $2, note
-      found = 1
     }
-    END {
-      if (!found) print "- (none)"
-    }
-  ' "$EVIDENCE_FILE"
+  '
+}
+
+print_evidence_index() {
+  local tail_count="${1:-0}"
+  local total omitted
+
+  total="$(awk 'NR > 1 { c++ } END { print c + 0 }' "$EVIDENCE_FILE")"
+  if ((total == 0)); then
+    echo "- (none)"
+    return
+  fi
+
+  omitted=0
+  if ((tail_count > 0 && total > tail_count)); then
+    omitted=$((total - tail_count))
+  fi
+
+  if ((tail_count > 0)); then
+    awk -F'\t' 'NR > 1 { print }' "$EVIDENCE_FILE" | tail -n "$tail_count" | format_evidence_lines
+  else
+    awk -F'\t' 'NR > 1 { print }' "$EVIDENCE_FILE" | format_evidence_lines
+  fi
+
+  if ((omitted > 0)); then
+    echo "- ... +$omitted older entries (see .pm/evidence.tsv)"
+  fi
 }
 
 print_pulse_tail() {
@@ -404,7 +453,13 @@ cmd_render() {
     print_state_section "NOW"
     print_state_section "IN_PROGRESS"
     print_state_section "BLOCKED"
-    print_state_section "NEXT"
+    if ((NEXT_LIMIT > 0)); then
+      print_state_section "NEXT" "$NEXT_LIMIT"
+      echo "> Next shows up to $NEXT_LIMIT items; see .pm/tickets.tsv for full backlog"
+      echo
+    else
+      print_state_section "NEXT"
+    fi
     echo "---"
     echo
     echo "## Acceptance criteria (required for active tasks)"
@@ -414,8 +469,11 @@ cmd_render() {
     echo
     echo "## Evidence index (keep it navigable)"
     echo "> Source of truth: .pm/evidence.tsv"
+    if ((EVIDENCE_TAIL > 0)); then
+      echo "> Showing latest $EVIDENCE_TAIL entries to keep status.md compact"
+    fi
     echo
-    print_evidence_index
+    print_evidence_index "$EVIDENCE_TAIL"
     echo
     echo "---"
     echo

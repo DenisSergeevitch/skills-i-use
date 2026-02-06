@@ -26,7 +26,7 @@
 
 ## Canon and Scope
 
-- Treat `status.md` as canonical project truth.
+- Treat `status.md` as the canonical human entrypoint and session snapshot.
 - Keep optional docs linked from `status.md` when used.
 - Keep optional docs consistent with `status.md`; resolve contradictions immediately.
 
@@ -129,8 +129,13 @@ Rules:
   - `.pm/criteria.tsv`
   - `.pm/evidence.tsv`
   - `.pm/pulse.log`
+- In ledger mode, `.pm/*` is the machine system of record and `status.md` is rendered from it.
 - Keep `.pm/pulse.log` append-only and never rewrite historical entries.
 - Render `status.md` from ledger state after task changes.
 - Keep `status.md` concise by showing recent pulse entries while linking `.pm/pulse.log` as full history.
+- Configure bounded rendering in `.pm/meta.env`:
+  - `NEXT_LIMIT` (default 20)
+  - `EVIDENCE_TAIL` (default 50)
+  - `PULSE_TAIL` (default 30)
 - Use `scripts/pm-ticket.sh` (Bash) or `scripts/pm-ticket.ps1` / `scripts/pm-ticket.cmd` (Windows) for all ledger operations to keep format stable.
 - For multi-agent locking, use `scripts/pm-collab.sh` (Bash) or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd` (Windows).

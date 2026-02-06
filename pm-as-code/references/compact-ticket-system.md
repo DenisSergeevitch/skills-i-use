@@ -12,6 +12,18 @@ Use this when `status.md` gets large and wastes context space.
 - `.pm/pulse.log`: append-only event log.
 - `status.md`: compact, rendered project snapshot.
 
+`status.md` remains the human entrypoint. In ledger mode, `.pm/*` is the machine system of record.
+
+## Render Bounds
+
+Configure these keys in `.pm/meta.env`:
+
+- `NEXT_LIMIT` (default `20`): max `Next` items shown in `status.md`
+- `EVIDENCE_TAIL` (default `50`): max recent evidence lines shown
+- `PULSE_TAIL` (default `30`): max recent pulse lines shown
+
+Set a value to `0` to disable that limit.
+
 ## Commands
 
 macOS/Linux (Bash):
@@ -129,3 +141,4 @@ scripts\pm-collab.cmd unclaim agent-a T-0001
 - Serializes write operations with a lock (`.pm/.collab-lock`).
 - Prevents conflicting edits by enforcing per-task claims.
 - Keeps coordination data in `.pm/claims.tsv` and Pulse Log.
+- Renderer annotates claimed tasks (for non-DONE states) to reduce duplicate work.
