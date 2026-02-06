@@ -2,46 +2,50 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PMDir = ".pm"
-$LockDir = Join-Path $PMDir ".collab-lock"
-$LockInfo = Join-Path $LockDir "lock.env"
-$ClaimsFile = Join-Path $PMDir "claims.tsv"
-$PulseFile = Join-Path $PMDir "pulse.log"
+$PMRoot = ".pm"
+$script:Scope = if ($env:PM_SCOPE) { $env:PM_SCOPE } else { "default" }
 
-$LockWaitSeconds = 120
-$LockStaleSeconds = 900
-$LockPollSeconds = 1
+$script:PMDir = ""
+$script:LockDir = ""
+$script:LockInfo = ""
+$script:ClaimsFile = ""
+$script:PulseFile = ""
+$script:TicketsFile = ""
+
+$script:LockWaitSeconds = 120
+$script:LockStaleSeconds = 900
+$script:LockPollSeconds = 1
 
 if ($env:PM_LOCK_WAIT_SECONDS) {
-    $LockWaitSeconds = [int]$env:PM_LOCK_WAIT_SECONDS
+    $script:LockWaitSeconds = [int]$env:PM_LOCK_WAIT_SECONDS
 }
 if ($env:PM_LOCK_STALE_SECONDS) {
-    $LockStaleSeconds = [int]$env:PM_LOCK_STALE_SECONDS
+    $script:LockStaleSeconds = [int]$env:PM_LOCK_STALE_SECONDS
 }
 if ($env:PM_LOCK_POLL_SECONDS) {
-    $LockPollSeconds = [int]$env:PM_LOCK_POLL_SECONDS
+    $script:LockPollSeconds = [int]$env:PM_LOCK_POLL_SECONDS
 }
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PMTicket = Join-Path $ScriptDir "pm-ticket.ps1"
+$script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:PMTicket = Join-Path $script:ScriptDir "pm-ticket.ps1"
 $script:LockToken = ""
 
 function Write-Usage {
     @'
 Usage:
-  pm-collab.ps1 init
-  pm-collab.ps1 claim <agent> <T-0001> [note]
-  pm-collab.ps1 unclaim <agent> <T-0001>
-  pm-collab.ps1 claims
-  pm-collab.ps1 run <agent> -- <pm-ticket command...>
-  pm-collab.ps1 lock-info
-  pm-collab.ps1 unlock-stale
+  pm-collab.ps1 [--scope <name>] init
+  pm-collab.ps1 [--scope <name>] claim <agent> <T-0001> [note]
+  pm-collab.ps1 [--scope <name>] unclaim <agent> <T-0001>
+  pm-collab.ps1 [--scope <name>] claims
+  pm-collab.ps1 [--scope <name>] run <agent> -- <pm-ticket command...>
+  pm-collab.ps1 [--scope <name>] lock-info
+  pm-collab.ps1 [--scope <name>] unlock-stale
 
 Examples:
-  scripts/pm-collab.ps1 init
-  scripts/pm-collab.ps1 claim agent-a T-0001 "taking API task"
-  scripts/pm-collab.ps1 run agent-a -- move T-0001 in-progress
-  scripts/pm-collab.ps1 run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
+  scripts/pm-collab.ps1 --scope backend init
+  scripts/pm-collab.ps1 --scope backend claim agent-a T-0001 "taking API task"
+  scripts/pm-collab.ps1 --scope backend run agent-a -- move T-0001 in-progress
+  scripts/pm-collab.ps1 --scope backend run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
 '@ | Write-Output
 }
 
@@ -53,21 +57,121 @@ function Sanitize([string]$Text) {
     if ($null -eq $Text) {
         return ""
     }
-    $value = $Text -replace "`t", " " -replace "`r", " " -replace "`n", " "
-    return $value
+    return ($Text -replace "`t", " " -replace "`r", " " -replace "`n", " ")
+}
+
+function Validate-ScopeName([string]$Name) {
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        throw "error: scope cannot be empty"
+    }
+    if ($Name -notmatch "^[A-Za-z0-9._-]+$") {
+        throw "error: invalid scope '$Name' (allowed: letters, digits, ., _, -)"
+    }
+}
+
+function Parse-GlobalOptions([string[]]$InputArgs) {
+    $remaining = [System.Collections.Generic.List[string]]::new()
+    $i = 0
+
+    while ($i -lt $InputArgs.Count) {
+        $arg = $InputArgs[$i]
+        if ($arg -eq "--scope") {
+            if ($i + 1 -ge $InputArgs.Count) {
+                throw "error: --scope requires a value"
+            }
+            $script:Scope = $InputArgs[$i + 1]
+            $i += 2
+            continue
+        }
+        if ($arg.StartsWith("--scope=")) {
+            $script:Scope = $arg.Substring(8)
+            $i += 1
+            continue
+        }
+        if ($arg -eq "-h" -or $arg -eq "--help") {
+            Write-Usage
+            exit 0
+        }
+        if ($arg -eq "--") {
+            for ($j = $i + 1; $j -lt $InputArgs.Count; $j++) {
+                $remaining.Add($InputArgs[$j])
+            }
+            $i = $InputArgs.Count
+            break
+        }
+
+        for ($j = $i; $j -lt $InputArgs.Count; $j++) {
+            $remaining.Add($InputArgs[$j])
+        }
+        $i = $InputArgs.Count
+        break
+    }
+
+    Validate-ScopeName $script:Scope
+    return @($remaining.ToArray())
+}
+
+function Set-ScopePaths {
+    $script:PMDir = Join-Path $PMRoot ("scopes/" + $script:Scope)
+    $script:LockDir = Join-Path $script:PMDir ".collab-lock"
+    $script:LockInfo = Join-Path $script:LockDir "lock.env"
+    $script:ClaimsFile = Join-Path $script:PMDir "claims.tsv"
+    $script:PulseFile = Join-Path $script:PMDir "pulse.log"
+    $script:TicketsFile = Join-Path $script:PMDir "tickets.tsv"
+}
+
+function Migrate-LegacyDefaultScope {
+    if ($script:Scope -ne "default") {
+        return
+    }
+
+    if (Test-Path -LiteralPath $script:PMDir -PathType Container) {
+        return
+    }
+
+    $legacyFiles = @(
+        "meta.env",
+        "core.md",
+        "tickets.tsv",
+        "criteria.tsv",
+        "evidence.tsv",
+        "pulse.log",
+        "claims.tsv"
+    )
+
+    $legacyFound = $false
+    foreach ($f in $legacyFiles) {
+        if (Test-Path -LiteralPath (Join-Path $PMRoot $f) -PathType Leaf) {
+            $legacyFound = $true
+            break
+        }
+    }
+
+    if (-not $legacyFound) {
+        return
+    }
+
+    New-Item -ItemType Directory -Path $script:PMDir -Force | Out-Null
+    foreach ($f in $legacyFiles) {
+        $oldPath = Join-Path $PMRoot $f
+        $newPath = Join-Path $script:PMDir $f
+        if (Test-Path -LiteralPath $oldPath -PathType Leaf) {
+            Move-Item -LiteralPath $oldPath -Destination $newPath -Force
+        }
+    }
 }
 
 function Require-PMTicket {
-    if (-not (Test-Path -LiteralPath $PMTicket -PathType Leaf)) {
-        throw "error: missing $PMTicket"
+    if (-not (Test-Path -LiteralPath $script:PMTicket -PathType Leaf)) {
+        throw "error: missing $script:PMTicket"
     }
 }
 
 function Read-LockField([string]$Key) {
-    if (-not (Test-Path -LiteralPath $LockInfo -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $script:LockInfo -PathType Leaf)) {
         return ""
     }
-    foreach ($line in Get-Content -LiteralPath $LockInfo) {
+    foreach ($line in Get-Content -LiteralPath $script:LockInfo) {
         if ($line -match "^\Q$Key\E=(.*)$") {
             return $Matches[1]
         }
@@ -76,10 +180,10 @@ function Read-LockField([string]$Key) {
 }
 
 function Lock-AgeSeconds {
-    if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $script:LockDir -PathType Container)) {
         return 0
     }
-    $item = Get-Item -LiteralPath $LockDir
+    $item = Get-Item -LiteralPath $script:LockDir
     $age = [int]((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds
     if ($age -lt 0) {
         return 0
@@ -88,16 +192,16 @@ function Lock-AgeSeconds {
 }
 
 function Remove-LockDir {
-    if (Test-Path -LiteralPath $LockInfo -PathType Leaf) {
-        Remove-Item -LiteralPath $LockInfo -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $script:LockInfo -PathType Leaf) {
+        Remove-Item -LiteralPath $script:LockInfo -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path -LiteralPath $LockDir -PathType Container) {
-        Remove-Item -LiteralPath $LockDir -Force -Recurse -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $script:LockDir -PathType Container) {
+        Remove-Item -LiteralPath $script:LockDir -Force -Recurse -ErrorAction SilentlyContinue
     }
 }
 
 function Lock-IsStale {
-    if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $script:LockDir -PathType Container)) {
         return $false
     }
 
@@ -116,7 +220,7 @@ function Lock-IsStale {
     }
 
     $age = Lock-AgeSeconds
-    return ($age -ge $LockStaleSeconds)
+    return ($age -ge $script:LockStaleSeconds)
 }
 
 function Release-Lock {
@@ -124,7 +228,7 @@ function Release-Lock {
         return
     }
 
-    if (Test-Path -LiteralPath $LockDir -PathType Container) {
+    if (Test-Path -LiteralPath $script:LockDir -PathType Container) {
         $token = Read-LockField "token"
         if ($token -ne "" -and $token -eq $script:LockToken) {
             Remove-LockDir
@@ -134,14 +238,14 @@ function Release-Lock {
 }
 
 function Acquire-Lock([string]$Agent) {
-    if (-not (Test-Path -LiteralPath $PMDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $PMDir | Out-Null
+    if (-not (Test-Path -LiteralPath $script:PMDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:PMDir | Out-Null
     }
 
-    $deadline = (Get-Date).AddSeconds($LockWaitSeconds)
+    $deadline = (Get-Date).AddSeconds($script:LockWaitSeconds)
     while ($true) {
         try {
-            New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
+            New-Item -ItemType Directory -Path $script:LockDir -ErrorAction Stop | Out-Null
             $script:LockToken = "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())-$PID-$(Get-Random)"
             $lockLines = @(
                 "agent=$Agent"
@@ -150,7 +254,7 @@ function Acquire-Lock([string]$Agent) {
                 "token=$script:LockToken"
                 "started=$(Get-NowTs)"
             )
-            Set-Content -LiteralPath $LockInfo -Value $lockLines
+            Set-Content -LiteralPath $script:LockInfo -Value $lockLines
             return
         } catch {
             if (Lock-IsStale) {
@@ -168,53 +272,47 @@ function Acquire-Lock([string]$Agent) {
                 if ($host -eq "") { $host = "unknown" }
                 if ($pid -eq "") { $pid = "unknown" }
                 if ($started -eq "") { $started = "unknown" }
-                throw "error: lock timeout after ${LockWaitSeconds}s`nlock owner: $owner`nlock host: $host`nlock pid: $pid`nlock started: $started"
+                throw "error: lock timeout after $($script:LockWaitSeconds)s`nscope: $script:Scope`nlock owner: $owner`nlock host: $host`nlock pid: $pid`nlock started: $started"
             }
 
-            Start-Sleep -Seconds $LockPollSeconds
+            Start-Sleep -Seconds $script:LockPollSeconds
         }
     }
 }
 
 function Append-Pulse([string]$TaskId, [string]$Event, [string]$Details = "") {
     $safeDetails = Sanitize $Details
-    Add-Content -LiteralPath $PulseFile -Value "$(Get-NowTs)|$TaskId|$Event|$safeDetails"
+    Add-Content -LiteralPath $script:PulseFile -Value "$(Get-NowTs)|$TaskId|$Event|$safeDetails"
 }
 
 function Ensure-PMInitialized {
-    $ticketsFile = Join-Path $PMDir "tickets.tsv"
-    if (-not (Test-Path -LiteralPath $ticketsFile -PathType Leaf)) {
-        throw "error: .pm not initialized. Run: scripts/pm-collab.ps1 init"
+    if (-not (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf)) {
+        throw "error: scope '$script:Scope' not initialized. Run: scripts/pm-collab.ps1 --scope $script:Scope init"
     }
 }
 
 function Ensure-ClaimsFile {
-    if (-not (Test-Path -LiteralPath $PMDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $PMDir | Out-Null
+    if (-not (Test-Path -LiteralPath $script:PMDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:PMDir | Out-Null
     }
-    if (-not (Test-Path -LiteralPath $ClaimsFile -PathType Leaf)) {
-        Set-Content -LiteralPath $ClaimsFile -Value "id`tagent`tclaimed_at`tnote"
+    if (-not (Test-Path -LiteralPath $script:ClaimsFile -PathType Leaf)) {
+        Set-Content -LiteralPath $script:ClaimsFile -Value "id`tagent`tclaimed_at`tnote"
     }
 }
 
 function Read-Tickets {
-    $ticketsFile = Join-Path $PMDir "tickets.tsv"
-    if (-not (Test-Path -LiteralPath $ticketsFile -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf)) {
         return @()
     }
-    $lines = Get-Content -LiteralPath $ticketsFile
+    $lines = Get-Content -LiteralPath $script:TicketsFile
     if ($lines.Count -le 1) {
         return @()
     }
     $rows = @()
     for ($i = 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq "") {
-            continue
-        }
+        if ($lines[$i] -eq "") { continue }
         $parts = $lines[$i].Split("`t", 6)
-        while ($parts.Count -lt 6) {
-            $parts += ""
-        }
+        while ($parts.Count -lt 6) { $parts += "" }
         $rows += [pscustomobject]@{
             id      = $parts[0]
             state   = $parts[1]
@@ -233,8 +331,7 @@ function Ticket-Exists([string]$TaskId) {
 }
 
 function Ticket-State([string]$TaskId) {
-    $rows = Read-Tickets
-    $row = $rows | Where-Object { $_.id -eq $TaskId } | Select-Object -First 1
+    $row = Read-Tickets | Where-Object { $_.id -eq $TaskId } | Select-Object -First 1
     if ($null -eq $row) {
         throw "error: task not found: $TaskId"
     }
@@ -242,22 +339,18 @@ function Ticket-State([string]$TaskId) {
 }
 
 function Read-Claims {
-    if (-not (Test-Path -LiteralPath $ClaimsFile -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $script:ClaimsFile -PathType Leaf)) {
         return @()
     }
-    $lines = Get-Content -LiteralPath $ClaimsFile
+    $lines = Get-Content -LiteralPath $script:ClaimsFile
     if ($lines.Count -le 1) {
         return @()
     }
     $rows = @()
     for ($i = 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq "") {
-            continue
-        }
+        if ($lines[$i] -eq "") { continue }
         $parts = $lines[$i].Split("`t", 4)
-        while ($parts.Count -lt 4) {
-            $parts += ""
-        }
+        while ($parts.Count -lt 4) { $parts += "" }
         $rows += [pscustomobject]@{
             id         = $parts[0]
             agent      = $parts[1]
@@ -273,12 +366,11 @@ function Write-Claims([array]$Rows) {
     foreach ($row in $Rows) {
         $out += "$($row.id)`t$($row.agent)`t$($row.claimed_at)`t$($row.note)"
     }
-    Set-Content -LiteralPath $ClaimsFile -Value $out
+    Set-Content -LiteralPath $script:ClaimsFile -Value $out
 }
 
 function Claim-Owner([string]$TaskId) {
-    $rows = Read-Claims
-    $row = $rows | Where-Object { $_.id -eq $TaskId } | Select-Object -First 1
+    $row = Read-Claims | Where-Object { $_.id -eq $TaskId } | Select-Object -First 1
     if ($null -eq $row) {
         return ""
     }
@@ -319,7 +411,7 @@ function Is-MutatingPMCommand([string]$PMCmd) {
 function Ensure-TaskClaimedByAgent([string]$Agent, [string]$TaskId) {
     $owner = Claim-Owner $TaskId
     if ($owner -eq "") {
-        throw "error: $TaskId is not claimed. Run: scripts/pm-collab.ps1 claim $Agent $TaskId"
+        throw "error: $TaskId is not claimed. Run: scripts/pm-collab.ps1 --scope $script:Scope claim $Agent $TaskId"
     }
     if ($owner -ne $Agent) {
         throw "error: $TaskId is claimed by '$owner' (agent '$Agent' cannot modify it)"
@@ -338,7 +430,7 @@ function Get-PowerShellExe {
 
 function Invoke-PMTicket([string[]]$Args) {
     $psExe = Get-PowerShellExe
-    & $psExe -NoProfile -ExecutionPolicy Bypass -File $PMTicket @Args
+    & $psExe -NoProfile -ExecutionPolicy Bypass -File $script:PMTicket --scope $script:Scope @Args
     if ($LASTEXITCODE -ne 0) {
         throw "error: pm-ticket failed with exit code $LASTEXITCODE"
     }
@@ -349,8 +441,8 @@ function Cmd-Init {
     try {
         Invoke-PMTicket @("init")
         Ensure-ClaimsFile
-        Append-Pulse "SYSTEM" "COLLAB_INIT" "collab lock and claims enabled"
-        Invoke-PMTicket @("render", "status.md")
+        Append-Pulse "SYSTEM" "COLLAB_INIT" "collab lock and claims enabled (scope=$script:Scope)"
+        Invoke-PMTicket @("render")
     } finally {
         Release-Lock
     }
@@ -382,13 +474,13 @@ function Cmd-Claim([string]$Agent, [string]$TaskId, [string]$Note = "") {
             throw "error: $TaskId already claimed by $owner"
         }
 
-        Add-Content -LiteralPath $ClaimsFile -Value "$TaskId`t$Agent`t$(Get-NowTs)`t$safeNote"
+        Add-Content -LiteralPath $script:ClaimsFile -Value "$TaskId`t$Agent`t$(Get-NowTs)`t$safeNote"
         $details = "agent=$Agent"
         if ($safeNote -ne "") {
             $details = "$details note=$safeNote"
         }
         Append-Pulse $TaskId "CLAIM" $details
-        Invoke-PMTicket @("render", "status.md")
+        Invoke-PMTicket @("render")
         Write-Output "$TaskId claimed by $Agent"
     } finally {
         Release-Lock
@@ -411,7 +503,7 @@ function Cmd-Unclaim([string]$Agent, [string]$TaskId) {
 
         Remove-Claim $TaskId
         Append-Pulse $TaskId "UNCLAIM" "agent=$Agent"
-        Invoke-PMTicket @("render", "status.md")
+        Invoke-PMTicket @("render")
         Write-Output "$TaskId released by $Agent"
     } finally {
         Release-Lock
@@ -432,8 +524,9 @@ function Cmd-Claims {
 }
 
 function Cmd-LockInfo {
-    if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $script:LockDir -PathType Container)) {
         Write-Output "lock: free"
+        Write-Output "scope: $script:Scope"
         return
     }
     $owner = Read-LockField "agent"
@@ -445,6 +538,7 @@ function Cmd-LockInfo {
     if ($pid -eq "") { $pid = "unknown" }
     if ($started -eq "") { $started = "unknown" }
     Write-Output "lock: held"
+    Write-Output "scope: $script:Scope"
     Write-Output "owner: $owner"
     Write-Output "host: $host"
     Write-Output "pid: $pid"
@@ -453,7 +547,7 @@ function Cmd-LockInfo {
 }
 
 function Cmd-UnlockStale {
-    if (-not (Test-Path -LiteralPath $LockDir -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $script:LockDir -PathType Container)) {
         Write-Output "lock already free"
         return
     }
@@ -507,24 +601,27 @@ function Cmd-Run([string]$Agent, [string[]]$PMArgs) {
         }
 
         if ((Is-MutatingPMCommand $pmCmd) -and $pmCmd -ne "render") {
-            Invoke-PMTicket @("render", "status.md")
+            Invoke-PMTicket @("render")
         }
     } finally {
         Release-Lock
     }
 }
 
+$remainingArgs = Parse-GlobalOptions $args
+Set-ScopePaths
+Migrate-LegacyDefaultScope
 Require-PMTicket
 
-if ($args.Count -lt 1) {
+if ($remainingArgs.Count -lt 1) {
     Write-Usage
     exit 1
 }
 
-$command = $args[0]
+$command = $remainingArgs[0]
 $rest = @()
-if ($args.Count -gt 1) {
-    $rest = $args[1..($args.Count - 1)]
+if ($remainingArgs.Count -gt 1) {
+    $rest = $remainingArgs[1..($remainingArgs.Count - 1)]
 }
 
 try {
@@ -534,8 +631,7 @@ try {
         }
         "claim" {
             if ($rest.Count -lt 2) { throw "error: claim requires <agent> <task-id>" }
-            $note = ""
-            if ($rest.Count -ge 3) { $note = $rest[2] }
+            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
             Cmd-Claim $rest[0] $rest[1] $note
         }
         "unclaim" {

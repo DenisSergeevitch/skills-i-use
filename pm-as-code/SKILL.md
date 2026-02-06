@@ -39,13 +39,20 @@ Use direct Markdown mode for short projects.
 Use ledger mode when `status.md` grows:
 - `scripts/pm-ticket.sh` (Bash)
 - `scripts/pm-ticket.ps1` or `scripts/pm-ticket.cmd` (Windows)
-- Ledger files in `.pm/*` are the machine record.
-- `status.md` is the rendered human snapshot.
+- Prefer scoped ledgers for parallel teams: `--scope <name>` (or `PM_SCOPE`).
+- Ledger files in `.pm/scopes/<scope>/*` are the machine record.
+- `status.md` is rendered:
+  - single default scope: full snapshot
+  - multiple scopes (or non-default only): compact scope index to `status.<scope>.md`
 
 Use multi-agent mode for shared workspaces:
 - `scripts/pm-collab.sh` (Bash)
 - `scripts/pm-collab.ps1` or `scripts/pm-collab.cmd` (Windows)
 - Run all writes through collab wrappers (lock + per-task claim).
+
+For teammate handoffs, use a bounded task pack:
+- `scripts/pm-ticket.sh [--scope <name>] render-context <T-0001> [evidence-tail]`
+- `scripts/pm-ticket.ps1 [--scope <name>] render-context <T-0001> [evidence-tail]`
 
 ## References
 

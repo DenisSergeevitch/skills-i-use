@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PM_DIR=".pm"
-LOCK_DIR="$PM_DIR/.collab-lock"
-LOCK_INFO="$LOCK_DIR/lock.env"
-CLAIMS_FILE="$PM_DIR/claims.tsv"
-PULSE_FILE="$PM_DIR/pulse.log"
+PM_ROOT=".pm"
+SCOPE="${PM_SCOPE:-default}"
+
+PM_DIR=""
+LOCK_DIR=""
+LOCK_INFO=""
+CLAIMS_FILE=""
+PULSE_FILE=""
+TICKETS_FILE=""
 
 LOCK_WAIT_SECONDS="${PM_LOCK_WAIT_SECONDS:-120}"
 LOCK_STALE_SECONDS="${PM_LOCK_STALE_SECONDS:-900}"
@@ -14,24 +18,25 @@ LOCK_POLL_SECONDS="${PM_LOCK_POLL_SECONDS:-1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PM_TICKET="$SCRIPT_DIR/pm-ticket.sh"
 LOCK_TOKEN=""
+PARSED_ARGS=()
 
 usage() {
-  cat <<'EOF'
+  cat <<'EOF_USAGE'
 Usage:
-  pm-collab.sh init
-  pm-collab.sh claim <agent> <T-0001> [note]
-  pm-collab.sh unclaim <agent> <T-0001>
-  pm-collab.sh claims
-  pm-collab.sh run <agent> -- <pm-ticket command...>
-  pm-collab.sh lock-info
-  pm-collab.sh unlock-stale
+  pm-collab.sh [--scope <name>] init
+  pm-collab.sh [--scope <name>] claim <agent> <T-0001> [note]
+  pm-collab.sh [--scope <name>] unclaim <agent> <T-0001>
+  pm-collab.sh [--scope <name>] claims
+  pm-collab.sh [--scope <name>] run <agent> -- <pm-ticket command...>
+  pm-collab.sh [--scope <name>] lock-info
+  pm-collab.sh [--scope <name>] unlock-stale
 
 Examples:
-  scripts/pm-collab.sh init
-  scripts/pm-collab.sh claim agent-a T-0001 "taking API task"
-  scripts/pm-collab.sh run agent-a -- move T-0001 in-progress
-  scripts/pm-collab.sh run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
-EOF
+  scripts/pm-collab.sh --scope backend init
+  scripts/pm-collab.sh --scope backend claim agent-a T-0001 "taking API task"
+  scripts/pm-collab.sh --scope backend run agent-a -- move T-0001 in-progress
+  scripts/pm-collab.sh --scope backend run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
+EOF_USAGE
 }
 
 now_ts() {
@@ -45,11 +50,111 @@ sanitize() {
   printf '%s' "$s"
 }
 
+validate_scope_name() {
+  local scope="$1"
+  if [[ -z "$scope" ]]; then
+    echo "error: scope cannot be empty" >&2
+    exit 1
+  fi
+  if [[ ! "$scope" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "error: invalid scope '$scope' (allowed: letters, digits, ., _, -)" >&2
+    exit 1
+  fi
+}
+
+parse_global_options() {
+  PARSED_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --scope)
+        if [[ $# -lt 2 ]]; then
+          echo "error: --scope requires a value" >&2
+          exit 1
+        fi
+        SCOPE="$2"
+        shift 2
+        ;;
+      --scope=*)
+        SCOPE="${1#*=}"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  validate_scope_name "$SCOPE"
+  PARSED_ARGS=("$@")
+}
+
+set_scope_paths() {
+  PM_DIR="$PM_ROOT/scopes/$SCOPE"
+  LOCK_DIR="$PM_DIR/.collab-lock"
+  LOCK_INFO="$LOCK_DIR/lock.env"
+  CLAIMS_FILE="$PM_DIR/claims.tsv"
+  PULSE_FILE="$PM_DIR/pulse.log"
+  TICKETS_FILE="$PM_DIR/tickets.tsv"
+}
+
+migrate_legacy_default_scope() {
+  if [[ "$SCOPE" != "default" ]]; then
+    return
+  fi
+
+  local legacy_files=(
+    meta.env
+    core.md
+    tickets.tsv
+    criteria.tsv
+    evidence.tsv
+    pulse.log
+    claims.tsv
+  )
+
+  local legacy_found=0
+  local f
+  for f in "${legacy_files[@]}"; do
+    if [[ -f "$PM_ROOT/$f" ]]; then
+      legacy_found=1
+      break
+    fi
+  done
+
+  if ((legacy_found == 0)); then
+    return
+  fi
+
+  if [[ -d "$PM_DIR" ]]; then
+    return
+  fi
+
+  mkdir -p "$PM_DIR"
+  for f in "${legacy_files[@]}"; do
+    if [[ -f "$PM_ROOT/$f" ]]; then
+      mv "$PM_ROOT/$f" "$PM_DIR/$f"
+    fi
+  done
+}
+
 require_pm_ticket() {
   if [[ ! -x "$PM_TICKET" ]]; then
     echo "error: missing executable $PM_TICKET" >&2
     exit 1
   fi
+}
+
+invoke_pm_ticket() {
+  "$PM_TICKET" --scope "$SCOPE" "$@"
 }
 
 stat_mtime() {
@@ -126,13 +231,13 @@ acquire_lock() {
   while true; do
     if mkdir "$LOCK_DIR" 2>/dev/null; then
       LOCK_TOKEN="$(date +%s)-$$-${RANDOM}"
-      cat >"$LOCK_INFO" <<EOF
+      cat >"$LOCK_INFO" <<EOF_LOCK
 agent=$agent
 pid=$$
 host=$(hostname)
 token=$LOCK_TOKEN
 started=$(now_ts)
-EOF
+EOF_LOCK
       trap release_lock EXIT INT TERM
       return 0
     fi
@@ -146,6 +251,7 @@ EOF
     now="$(date +%s)"
     if ((now >= deadline)); then
       echo "error: lock timeout after ${LOCK_WAIT_SECONDS}s" >&2
+      echo "scope: $SCOPE" >&2
       echo "lock owner: $(read_lock_field agent || echo unknown)" >&2
       echo "lock host: $(read_lock_field host || echo unknown)" >&2
       echo "lock pid: $(read_lock_field pid || echo unknown)" >&2
@@ -166,8 +272,8 @@ append_pulse() {
 }
 
 ensure_pm_initialized() {
-  if [[ ! -f "$PM_DIR/tickets.tsv" ]]; then
-    echo "error: .pm not initialized. Run: scripts/pm-collab.sh init" >&2
+  if [[ ! -f "$TICKETS_FILE" ]]; then
+    echo "error: scope '$SCOPE' not initialized. Run: scripts/pm-collab.sh --scope $SCOPE init" >&2
     exit 1
   fi
 }
@@ -181,12 +287,12 @@ ensure_claims_file() {
 
 ticket_exists() {
   local task_id="$1"
-  awk -F'\t' -v id="$task_id" 'NR > 1 && $1 == id { found=1 } END { exit(found ? 0 : 1) }' "$PM_DIR/tickets.tsv"
+  awk -F'\t' -v id="$task_id" 'NR > 1 && $1 == id { found=1 } END { exit(found ? 0 : 1) }' "$TICKETS_FILE"
 }
 
 ticket_state() {
   local task_id="$1"
-  awk -F'\t' -v id="$task_id" 'NR > 1 && $1 == id { print $2; found=1; exit } END { if (!found) exit 1 }' "$PM_DIR/tickets.tsv"
+  awk -F'\t' -v id="$task_id" 'NR > 1 && $1 == id { print $2; found=1; exit } END { if (!found) exit 1 }' "$TICKETS_FILE"
 }
 
 claim_owner() {
@@ -232,7 +338,7 @@ ensure_task_claimed_by_agent() {
 
   owner="$(claim_owner "$task_id" || true)"
   if [[ -z "$owner" ]]; then
-    echo "error: $task_id is not claimed. Run: scripts/pm-collab.sh claim $agent $task_id" >&2
+    echo "error: $task_id is not claimed. Run: scripts/pm-collab.sh --scope $SCOPE claim $agent $task_id" >&2
     exit 1
   fi
   if [[ "$owner" != "$agent" ]]; then
@@ -243,10 +349,10 @@ ensure_task_claimed_by_agent() {
 
 cmd_init() {
   acquire_lock "SYSTEM"
-  "$PM_TICKET" init
+  invoke_pm_ticket init
   ensure_claims_file
-  append_pulse "SYSTEM" "COLLAB_INIT" "collab lock and claims enabled"
-  "$PM_TICKET" render status.md
+  append_pulse "SYSTEM" "COLLAB_INIT" "collab lock and claims enabled (scope=$SCOPE)"
+  invoke_pm_ticket render
 }
 
 cmd_claim() {
@@ -283,7 +389,7 @@ cmd_claim() {
 
   printf '%s\t%s\t%s\t%s\n' "$task_id" "$agent" "$(now_ts)" "$note" >>"$CLAIMS_FILE"
   append_pulse "$task_id" "CLAIM" "agent=$agent${note:+ note=$note}"
-  "$PM_TICKET" render status.md
+  invoke_pm_ticket render
   echo "$task_id claimed by $agent"
 }
 
@@ -308,7 +414,7 @@ cmd_unclaim() {
 
   remove_claim "$task_id"
   append_pulse "$task_id" "UNCLAIM" "agent=$agent"
-  "$PM_TICKET" render status.md
+  invoke_pm_ticket render
   echo "$task_id released by $agent"
 }
 
@@ -325,9 +431,11 @@ cmd_claims() {
 cmd_lock_info() {
   if [[ ! -d "$LOCK_DIR" ]]; then
     echo "lock: free"
+    echo "scope: $SCOPE"
     return
   fi
   echo "lock: held"
+  echo "scope: $SCOPE"
   echo "owner: $(read_lock_field agent || echo unknown)"
   echo "host: $(read_lock_field host || echo unknown)"
   echo "pid: $(read_lock_field pid || echo unknown)"
@@ -375,7 +483,7 @@ cmd_run() {
     ensure_task_claimed_by_agent "$agent" "$task_id"
   fi
 
-  "$PM_TICKET" "$@"
+  invoke_pm_ticket "$@"
 
   if [[ -n "$task_id" && "$pm_cmd" == "done" ]]; then
     if [[ "$(claim_owner "$task_id" || true)" == "$agent" ]]; then
@@ -385,11 +493,16 @@ cmd_run() {
   fi
 
   if is_mutating_pm_command "$pm_cmd" && [[ "$pm_cmd" != "render" ]]; then
-    "$PM_TICKET" render status.md
+    invoke_pm_ticket render
   fi
 }
 
 main() {
+  parse_global_options "$@"
+  set -- "${PARSED_ARGS[@]}"
+
+  set_scope_paths
+  migrate_legacy_default_scope
   require_pm_ticket
 
   if [[ $# -lt 1 ]]; then

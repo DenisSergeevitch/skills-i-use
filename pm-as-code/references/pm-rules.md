@@ -124,18 +124,19 @@ Finish task:
 Use compact mode for long-running projects when `status.md` becomes too large.
 
 Rules:
-- Keep source-of-truth state in `.pm/`:
-  - `.pm/tickets.tsv`
-  - `.pm/criteria.tsv`
-  - `.pm/evidence.tsv`
-  - `.pm/pulse.log`
-- In ledger mode, `.pm/*` is the machine system of record and `status.md` is rendered from it.
-- Keep `.pm/pulse.log` append-only and never rewrite historical entries.
+- Keep source-of-truth state in `.pm/scopes/<scope>/`:
+  - `tickets.tsv`
+  - `criteria.tsv`
+  - `evidence.tsv`
+  - `pulse.log`
+- In ledger mode, `.pm/scopes/<scope>/*` is the machine system of record and `status.md` is rendered from it.
+- Keep `.pm/scopes/<scope>/pulse.log` append-only and never rewrite historical entries.
 - Render `status.md` from ledger state after task changes.
-- Keep `status.md` concise by showing recent pulse entries while linking `.pm/pulse.log` as full history.
-- Configure bounded rendering in `.pm/meta.env`:
+- Keep `status.md` concise by showing recent pulse entries while linking scoped pulse logs as full history.
+- Configure bounded rendering in `.pm/scopes/<scope>/meta.env`:
   - `NEXT_LIMIT` (default 20)
   - `EVIDENCE_TAIL` (default 50)
   - `PULSE_TAIL` (default 30)
+- Use scope selection (`--scope` or `PM_SCOPE`) to isolate teams/swarm lanes.
 - Use `scripts/pm-ticket.sh` (Bash) or `scripts/pm-ticket.ps1` / `scripts/pm-ticket.cmd` (Windows) for all ledger operations to keep format stable.
 - For multi-agent locking, use `scripts/pm-collab.sh` (Bash) or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd` (Windows).

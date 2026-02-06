@@ -4,19 +4,35 @@ Use this when `status.md` gets large and wastes context space.
 
 ## What It Stores
 
-- `.pm/meta.env`: counters and render settings.
-- `.pm/core.md`: stable core context block.
-- `.pm/tickets.tsv`: task ID, state, title, deps, timestamps.
-- `.pm/criteria.tsv`: acceptance criteria by task ID.
-- `.pm/evidence.tsv`: completion evidence records.
-- `.pm/pulse.log`: append-only event log.
-- `status.md`: compact, rendered project snapshot.
+- `.pm/scopes/<scope>/meta.env`: counters and render settings.
+- `.pm/scopes/<scope>/core.md`: stable core context block.
+- `.pm/scopes/<scope>/tickets.tsv`: task ID, state, title, deps, timestamps.
+- `.pm/scopes/<scope>/criteria.tsv`: acceptance criteria by task ID.
+- `.pm/scopes/<scope>/evidence.tsv`: completion evidence records.
+- `.pm/scopes/<scope>/pulse.log`: append-only event log.
+- `.pm/scopes/<scope>/claims.tsv` (optional): claim ownership in multi-agent mode.
+- `status.md` plus `status.<scope>.md`: rendered snapshots/index.
 
-`status.md` remains the human entrypoint. In ledger mode, `.pm/*` is the machine system of record.
+`status.md` remains the human entrypoint. In ledger mode, `.pm/scopes/<scope>/*` is the machine system of record.
+
+## Scope / Team Namespace
+
+Use a scope for each team/swarm lane:
+
+- CLI: `--scope <name>`
+- Env fallback: `PM_SCOPE=<name>`
+- Default when omitted: `default`
+
+Scope data lives in `.pm/scopes/<scope>/...`.
+
+Rendering behavior:
+
+- Only `default` scope exists: `status.md` is the full snapshot.
+- Multiple scopes or non-default-only scopes: `status.md` is a compact index linking to `status.<scope>.md`.
 
 ## Render Bounds
 
-Configure these keys in `.pm/meta.env`:
+Configure these keys in `.pm/scopes/<scope>/meta.env`:
 
 - `NEXT_LIMIT` (default `20`): max `Next` items shown in `status.md`
 - `EVIDENCE_TAIL` (default `50`): max recent evidence lines shown
@@ -37,6 +53,24 @@ scripts/pm-ticket.sh criterion-check T-0001 1
 scripts/pm-ticket.sh evidence T-0001 "src/auth/callback.ts" "state validation added"
 scripts/pm-ticket.sh done T-0001 "src/auth/callback.ts" "manual test passed"
 scripts/pm-ticket.sh render status.md
+```
+
+Scoped Bash example:
+
+```bash
+scripts/pm-ticket.sh --scope backend init
+scripts/pm-ticket.sh --scope backend new next "Implement OAuth callback flow"
+scripts/pm-ticket.sh --scope backend render
+scripts/pm-ticket.sh --scope backend render-context T-0001 8
+```
+
+Scoped PowerShell example:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-ticket.ps1 --scope backend init
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-ticket.ps1 --scope backend new next "Implement OAuth callback flow"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-ticket.ps1 --scope backend render
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-ticket.ps1 --scope backend render-context T-0001 8
 ```
 
 Windows (PowerShell):
@@ -121,6 +155,7 @@ scripts\pm-collab.cmd unclaim agent-a T-0001
 4. Update state with `move`.
 5. Record evidence and close with `done`.
 6. Re-render `status.md` after task changes.
+7. Use `render-context` for bounded teammate handoffs per task.
 
 ## Recommended Workflow (Multi-Agent, No Git)
 
@@ -133,12 +168,12 @@ scripts\pm-collab.cmd unclaim agent-a T-0001
 ## Why This Saves Context
 
 - `status.md` stays small and scannable.
-- Full history stays in `.pm/pulse.log`.
+- Full history stays in scoped `.pm/scopes/<scope>/pulse.log`.
 - Structured TSV files avoid verbose prose growth.
 
 ## Why Multi-Agent Mode Works
 
-- Serializes write operations with a lock (`.pm/.collab-lock`).
+- Serializes write operations with a scoped lock (`.pm/scopes/<scope>/.collab-lock`).
 - Prevents conflicting edits by enforcing per-task claims.
-- Keeps coordination data in `.pm/claims.tsv` and Pulse Log.
+- Keeps coordination data in `.pm/scopes/<scope>/claims.tsv` and scoped Pulse Log.
 - Renderer annotates claimed tasks (for non-DONE states) to reduce duplicate work.

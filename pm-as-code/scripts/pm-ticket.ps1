@@ -2,28 +2,43 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PMDir = ".pm"
-$MetaFile = Join-Path $PMDir "meta.env"
-$CoreFile = Join-Path $PMDir "core.md"
-$TicketsFile = Join-Path $PMDir "tickets.tsv"
-$CriteriaFile = Join-Path $PMDir "criteria.tsv"
-$EvidenceFile = Join-Path $PMDir "evidence.tsv"
-$PulseFile = Join-Path $PMDir "pulse.log"
-$ClaimsFile = Join-Path $PMDir "claims.tsv"
+$PMRoot = ".pm"
+$script:Scope = if ($env:PM_SCOPE) { $env:PM_SCOPE } else { "default" }
+
+$script:PMDir = ""
+$script:MetaFile = ""
+$script:CoreFile = ""
+$script:TicketsFile = ""
+$script:CriteriaFile = ""
+$script:EvidenceFile = ""
+$script:PulseFile = ""
+$script:ClaimsFile = ""
+
+$script:NextTaskNum = 1
+$script:PulseTail = 30
+$script:NextLimit = 20
+$script:EvidenceTail = 50
+$script:ContextEvidenceTail = 10
 
 function Write-Usage {
     @'
 Usage:
-  pm-ticket.ps1 init
-  pm-ticket.ps1 new <now|in-progress|blocked|next> "<title>" [deps]
-  pm-ticket.ps1 move <T-0001> <now|in-progress|blocked|next|done> [note]
-  pm-ticket.ps1 criterion-add <T-0001> "<criterion>"
-  pm-ticket.ps1 criterion-check <T-0001> <index>
-  pm-ticket.ps1 evidence <T-0001> "<path-or-link>" [note]
-  pm-ticket.ps1 done <T-0001> "<path-or-link>" [note]
-  pm-ticket.ps1 list [state]
-  pm-ticket.ps1 render [status.md]
-  pm-ticket.ps1 next-id
+  pm-ticket.ps1 [--scope <name>] init
+  pm-ticket.ps1 [--scope <name>] new <now|in-progress|blocked|next> "<title>" [deps]
+  pm-ticket.ps1 [--scope <name>] move <T-0001> <now|in-progress|blocked|next|done> [note]
+  pm-ticket.ps1 [--scope <name>] criterion-add <T-0001> "<criterion>"
+  pm-ticket.ps1 [--scope <name>] criterion-check <T-0001> <index>
+  pm-ticket.ps1 [--scope <name>] evidence <T-0001> "<path-or-link>" [note]
+  pm-ticket.ps1 [--scope <name>] done <T-0001> "<path-or-link>" [note]
+  pm-ticket.ps1 [--scope <name>] list [state]
+  pm-ticket.ps1 [--scope <name>] render [status-file]
+  pm-ticket.ps1 [--scope <name>] render-context <T-0001> [evidence-tail]
+  pm-ticket.ps1 [--scope <name>] next-id
+
+Scope resolution order:
+1) --scope <name>
+2) PM_SCOPE environment variable
+3) default
 '@ | Write-Output
 }
 
@@ -39,13 +54,120 @@ function Sanitize([string]$Text) {
     if ($null -eq $Text) {
         return ""
     }
-    $value = $Text -replace "`t", " " -replace "`r", " " -replace "`n", " "
-    return $value
+    return ($Text -replace "`t", " " -replace "`r", " " -replace "`n", " ")
+}
+
+function Validate-ScopeName([string]$Name) {
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        throw "error: scope cannot be empty"
+    }
+    if ($Name -notmatch "^[A-Za-z0-9._-]+$") {
+        throw "error: invalid scope '$Name' (allowed: letters, digits, ., _, -)"
+    }
+}
+
+function Parse-GlobalOptions([string[]]$InputArgs) {
+    $remaining = [System.Collections.Generic.List[string]]::new()
+    $i = 0
+
+    while ($i -lt $InputArgs.Count) {
+        $arg = $InputArgs[$i]
+        if ($arg -eq "--scope") {
+            if ($i + 1 -ge $InputArgs.Count) {
+                throw "error: --scope requires a value"
+            }
+            $script:Scope = $InputArgs[$i + 1]
+            $i += 2
+            continue
+        }
+        if ($arg.StartsWith("--scope=")) {
+            $script:Scope = $arg.Substring(8)
+            $i += 1
+            continue
+        }
+        if ($arg -eq "-h" -or $arg -eq "--help") {
+            Write-Usage
+            exit 0
+        }
+        if ($arg -eq "--") {
+            for ($j = $i + 1; $j -lt $InputArgs.Count; $j++) {
+                $remaining.Add($InputArgs[$j])
+            }
+            $i = $InputArgs.Count
+            break
+        }
+
+        for ($j = $i; $j -lt $InputArgs.Count; $j++) {
+            $remaining.Add($InputArgs[$j])
+        }
+        $i = $InputArgs.Count
+        break
+    }
+
+    Validate-ScopeName $script:Scope
+    return @($remaining.ToArray())
+}
+
+function Set-ScopePaths {
+    $script:PMDir = Join-Path $PMRoot ("scopes/" + $script:Scope)
+    $script:MetaFile = Join-Path $script:PMDir "meta.env"
+    $script:CoreFile = Join-Path $script:PMDir "core.md"
+    $script:TicketsFile = Join-Path $script:PMDir "tickets.tsv"
+    $script:CriteriaFile = Join-Path $script:PMDir "criteria.tsv"
+    $script:EvidenceFile = Join-Path $script:PMDir "evidence.tsv"
+    $script:PulseFile = Join-Path $script:PMDir "pulse.log"
+    $script:ClaimsFile = Join-Path $script:PMDir "claims.tsv"
+}
+
+function Scoped-RelPath([string]$FileName) {
+    return ".pm/scopes/$script:Scope/$FileName"
+}
+
+function Migrate-LegacyDefaultScope {
+    if ($script:Scope -ne "default") {
+        return
+    }
+
+    if (Test-Path -LiteralPath $script:PMDir -PathType Container) {
+        return
+    }
+
+    $legacyFiles = @(
+        "meta.env",
+        "core.md",
+        "tickets.tsv",
+        "criteria.tsv",
+        "evidence.tsv",
+        "pulse.log",
+        "claims.tsv"
+    )
+
+    $legacyFound = $false
+    foreach ($f in $legacyFiles) {
+        if (Test-Path -LiteralPath (Join-Path $PMRoot $f) -PathType Leaf) {
+            $legacyFound = $true
+            break
+        }
+    }
+
+    if (-not $legacyFound) {
+        return
+    }
+
+    New-Item -ItemType Directory -Path $script:PMDir -Force | Out-Null
+    foreach ($f in $legacyFiles) {
+        $oldPath = Join-Path $PMRoot $f
+        $newPath = Join-Path $script:PMDir $f
+        if (Test-Path -LiteralPath $oldPath -PathType Leaf) {
+            Move-Item -LiteralPath $oldPath -Destination $newPath -Force
+        }
+    }
 }
 
 function Require-PMDir {
-    if (-not (Test-Path -LiteralPath $PMDir -PathType Container)) {
-        throw "error: $PMDir not initialized. Run: pm-ticket.ps1 init"
+    Migrate-LegacyDefaultScope
+    if (-not (Test-Path -LiteralPath $script:PMDir -PathType Container)) {
+        throw "error: $script:PMDir not initialized. Run: pm-ticket.ps1 --scope $script:Scope init"
     }
 }
 
@@ -84,56 +206,62 @@ function Format-TaskId([int]$Num) {
 }
 
 function Ensure-BaseFiles {
-    if (-not (Test-Path -LiteralPath $PMDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $PMDir | Out-Null
+    if (-not (Test-Path -LiteralPath $script:PMDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:PMDir | Out-Null
     }
-    if (-not (Test-Path -LiteralPath $TicketsFile)) {
-        Set-Content -LiteralPath $TicketsFile -Value "id`tstate`ttitle`tdeps`tcreated`tupdated"
+    if (-not (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf)) {
+        Set-Content -LiteralPath $script:TicketsFile -Value "id`tstate`ttitle`tdeps`tcreated`tupdated"
     }
-    if (-not (Test-Path -LiteralPath $CriteriaFile)) {
-        Set-Content -LiteralPath $CriteriaFile -Value "id`tdone`ttext"
+    if (-not (Test-Path -LiteralPath $script:CriteriaFile -PathType Leaf)) {
+        Set-Content -LiteralPath $script:CriteriaFile -Value "id`tdone`ttext"
     }
-    if (-not (Test-Path -LiteralPath $EvidenceFile)) {
-        Set-Content -LiteralPath $EvidenceFile -Value "id`tdate`tlocation`tnote"
+    if (-not (Test-Path -LiteralPath $script:EvidenceFile -PathType Leaf)) {
+        Set-Content -LiteralPath $script:EvidenceFile -Value "id`tdate`tlocation`tnote"
     }
-    if (-not (Test-Path -LiteralPath $PulseFile)) {
-        Set-Content -LiteralPath $PulseFile -Value @()
+    if (-not (Test-Path -LiteralPath $script:PulseFile -PathType Leaf)) {
+        Set-Content -LiteralPath $script:PulseFile -Value @()
     }
 }
 
-function Load-Meta {
-    Require-PMDir
-    if (-not (Test-Path -LiteralPath $MetaFile)) {
-        throw "error: missing $MetaFile"
-    }
+function Read-MetaHashtable {
     $meta = @{}
-    foreach ($line in Get-Content -LiteralPath $MetaFile) {
+    foreach ($line in Get-Content -LiteralPath $script:MetaFile) {
         if ($line -match "^\s*([A-Z_]+)=(.*)\s*$") {
             $meta[$Matches[1]] = $Matches[2]
         }
     }
-    $script:NextTaskNum = 1
-    $script:PulseTail = 30
-    $script:NextLimit = 20
-    $script:EvidenceTail = 50
-    if ($meta.ContainsKey("NEXT_TASK_NUM")) {
-        $script:NextTaskNum = [int]$meta["NEXT_TASK_NUM"]
+    return $meta
+}
+
+function Parse-IntOrDefault([hashtable]$Meta, [string]$Key, [int]$Default) {
+    if (-not $Meta.ContainsKey($Key)) {
+        return $Default
     }
-    if ($meta.ContainsKey("PULSE_TAIL")) {
-        $script:PulseTail = [int]$meta["PULSE_TAIL"]
+    $parsed = 0
+    if ([int]::TryParse($Meta[$Key], [ref]$parsed)) {
+        return $parsed
     }
-    if ($meta.ContainsKey("NEXT_LIMIT")) {
-        $script:NextLimit = [int]$meta["NEXT_LIMIT"]
+    return $Default
+}
+
+function Load-Meta {
+    Require-PMDir
+    if (-not (Test-Path -LiteralPath $script:MetaFile -PathType Leaf)) {
+        throw "error: missing $script:MetaFile"
     }
-    if ($meta.ContainsKey("EVIDENCE_TAIL")) {
-        $script:EvidenceTail = [int]$meta["EVIDENCE_TAIL"]
-    }
-    if ($script:NextLimit -lt 0) {
-        $script:NextLimit = 0
-    }
-    if ($script:EvidenceTail -lt 0) {
-        $script:EvidenceTail = 0
-    }
+
+    $meta = Read-MetaHashtable
+    $script:NextTaskNum = Parse-IntOrDefault $meta "NEXT_TASK_NUM" 1
+    $script:PulseTail = Parse-IntOrDefault $meta "PULSE_TAIL" 30
+    $script:NextLimit = Parse-IntOrDefault $meta "NEXT_LIMIT" 20
+    $script:EvidenceTail = Parse-IntOrDefault $meta "EVIDENCE_TAIL" 50
+    $script:ContextEvidenceTail = Parse-IntOrDefault $meta "CONTEXT_EVIDENCE_TAIL" 10
+
+    if ($script:NextTaskNum -lt 1) { $script:NextTaskNum = 1 }
+    if ($script:PulseTail -lt 0) { $script:PulseTail = 30 }
+    if ($script:NextLimit -lt 0) { $script:NextLimit = 20 }
+    if ($script:EvidenceTail -lt 0) { $script:EvidenceTail = 50 }
+    if ($script:ContextEvidenceTail -lt 0) { $script:ContextEvidenceTail = 10 }
 }
 
 function Save-Meta {
@@ -142,33 +270,29 @@ function Save-Meta {
         "PULSE_TAIL=$script:PulseTail"
         "NEXT_LIMIT=$script:NextLimit"
         "EVIDENCE_TAIL=$script:EvidenceTail"
+        "CONTEXT_EVIDENCE_TAIL=$script:ContextEvidenceTail"
     )
-    Set-Content -LiteralPath $MetaFile -Value $body
+    Set-Content -LiteralPath $script:MetaFile -Value $body
 }
 
 function Append-Pulse([string]$TaskId, [string]$Event, [string]$Details) {
     $safeDetails = Sanitize $Details
-    $line = "$(Get-NowTimestamp)|$TaskId|$Event|$safeDetails"
-    Add-Content -LiteralPath $PulseFile -Value $line
+    Add-Content -LiteralPath $script:PulseFile -Value "$(Get-NowTimestamp)|$TaskId|$Event|$safeDetails"
 }
 
 function Read-Tickets {
-    if (-not (Test-Path -LiteralPath $TicketsFile)) {
+    if (-not (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf)) {
         return @()
     }
-    $lines = Get-Content -LiteralPath $TicketsFile
+    $lines = Get-Content -LiteralPath $script:TicketsFile
     if ($lines.Count -le 1) {
         return @()
     }
     $rows = @()
     for ($i = 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq "") {
-            continue
-        }
+        if ($lines[$i] -eq "") { continue }
         $parts = $lines[$i].Split("`t", 6)
-        while ($parts.Count -lt 6) {
-            $parts += ""
-        }
+        while ($parts.Count -lt 6) { $parts += "" }
         $rows += [pscustomobject]@{
             id      = $parts[0]
             state   = $parts[1]
@@ -186,26 +310,22 @@ function Write-Tickets([array]$Rows) {
     foreach ($row in $Rows) {
         $out += "$($row.id)`t$($row.state)`t$($row.title)`t$($row.deps)`t$($row.created)`t$($row.updated)"
     }
-    Set-Content -LiteralPath $TicketsFile -Value $out
+    Set-Content -LiteralPath $script:TicketsFile -Value $out
 }
 
 function Read-Criteria {
-    if (-not (Test-Path -LiteralPath $CriteriaFile)) {
+    if (-not (Test-Path -LiteralPath $script:CriteriaFile -PathType Leaf)) {
         return @()
     }
-    $lines = Get-Content -LiteralPath $CriteriaFile
+    $lines = Get-Content -LiteralPath $script:CriteriaFile
     if ($lines.Count -le 1) {
         return @()
     }
     $rows = @()
     for ($i = 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq "") {
-            continue
-        }
+        if ($lines[$i] -eq "") { continue }
         $parts = $lines[$i].Split("`t", 3)
-        while ($parts.Count -lt 3) {
-            $parts += ""
-        }
+        while ($parts.Count -lt 3) { $parts += "" }
         $rows += [pscustomobject]@{
             id   = $parts[0]
             done = $parts[1]
@@ -220,26 +340,22 @@ function Write-Criteria([array]$Rows) {
     foreach ($row in $Rows) {
         $out += "$($row.id)`t$($row.done)`t$($row.text)"
     }
-    Set-Content -LiteralPath $CriteriaFile -Value $out
+    Set-Content -LiteralPath $script:CriteriaFile -Value $out
 }
 
 function Read-Evidence {
-    if (-not (Test-Path -LiteralPath $EvidenceFile)) {
+    if (-not (Test-Path -LiteralPath $script:EvidenceFile -PathType Leaf)) {
         return @()
     }
-    $lines = Get-Content -LiteralPath $EvidenceFile
+    $lines = Get-Content -LiteralPath $script:EvidenceFile
     if ($lines.Count -le 1) {
         return @()
     }
     $rows = @()
     for ($i = 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq "") {
-            continue
-        }
+        if ($lines[$i] -eq "") { continue }
         $parts = $lines[$i].Split("`t", 4)
-        while ($parts.Count -lt 4) {
-            $parts += ""
-        }
+        while ($parts.Count -lt 4) { $parts += "" }
         $rows += [pscustomobject]@{
             id       = $parts[0]
             date     = $parts[1]
@@ -252,21 +368,17 @@ function Read-Evidence {
 
 function Read-ClaimsMap {
     $claims = @{}
-    if (-not (Test-Path -LiteralPath $ClaimsFile)) {
+    if (-not (Test-Path -LiteralPath $script:ClaimsFile -PathType Leaf)) {
         return $claims
     }
-    $lines = Get-Content -LiteralPath $ClaimsFile
+    $lines = Get-Content -LiteralPath $script:ClaimsFile
     if ($lines.Count -le 1) {
         return $claims
     }
     for ($i = 1; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -eq "") {
-            continue
-        }
+        if ($lines[$i] -eq "") { continue }
         $parts = $lines[$i].Split("`t", 4)
-        while ($parts.Count -lt 4) {
-            $parts += ""
-        }
+        while ($parts.Count -lt 4) { $parts += "" }
         if ($parts[0] -ne "") {
             $claims[$parts[0]] = $parts[1]
         }
@@ -279,17 +391,81 @@ function Ticket-Exists([string]$TaskId) {
     return ($rows | Where-Object { $_.id -eq $TaskId }).Count -gt 0
 }
 
+function Discover-Scopes {
+    $scopesDir = Join-Path $PMRoot "scopes"
+    if (-not (Test-Path -LiteralPath $scopesDir -PathType Container)) {
+        return @()
+    }
+    $scopes = Get-ChildItem -LiteralPath $scopesDir -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name |
+        ForEach-Object { $_.Name }
+    if ($null -eq $scopes) {
+        return @()
+    }
+    return @($scopes)
+}
+
+function Default-StatusOutputPath {
+    $scopes = Discover-Scopes
+    if ($scopes.Count -eq 0) {
+        if ($script:Scope -eq "default") {
+            return "status.md"
+        }
+        return "status.$script:Scope.md"
+    }
+    if ($scopes.Count -eq 1 -and $scopes[0] -eq "default" -and $script:Scope -eq "default") {
+        return "status.md"
+    }
+    return "status.$script:Scope.md"
+}
+
+function Render-StatusIndex([string[]]$Scopes) {
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("# status.md")
+    $lines.Add("## Scope Index")
+    $lines.Add("")
+    $lines.Add("Last updated: $(Get-NowDate)")
+    $lines.Add("")
+    $lines.Add("Multiple PM scopes are available. Open a scope snapshot:")
+    $lines.Add("")
+
+    foreach ($scopeName in $Scopes) {
+        $snapshot = "status.$scopeName.md"
+        if (Test-Path -LiteralPath $snapshot -PathType Leaf) {
+            $lines.Add("- [$scopeName]($snapshot)")
+        } else {
+            $lines.Add("- $scopeName (missing snapshot: $snapshot)")
+        }
+    }
+
+    $lines.Add("")
+    $lines.Add("> Ledger roots: .pm/scopes/<scope>/")
+    Set-Content -LiteralPath "status.md" -Value $lines
+}
+
+function Render-StatusIndexIfNeeded {
+    $scopes = Discover-Scopes
+    if ($scopes.Count -eq 0) {
+        return
+    }
+    if ($scopes.Count -eq 1 -and $scopes[0] -eq "default") {
+        return
+    }
+    Render-StatusIndex $scopes
+}
+
 function Cmd-Init {
     Ensure-BaseFiles
-    if (-not (Test-Path -LiteralPath $MetaFile)) {
+    if (-not (Test-Path -LiteralPath $script:MetaFile -PathType Leaf)) {
         $script:NextTaskNum = 1
         $script:PulseTail = 30
         $script:NextLimit = 20
         $script:EvidenceTail = 50
+        $script:ContextEvidenceTail = 10
         Save-Meta
     }
-    if (-not (Test-Path -LiteralPath $CoreFile)) {
-        @'
+    if (-not (Test-Path -LiteralPath $script:CoreFile -PathType Leaf)) {
+@'
 ## CORE context (keep short; must stay true)
 
 ### Objective
@@ -309,23 +485,26 @@ function Cmd-Init {
 ### Scope boundaries (if helpful)
 - In scope: <...>
 - Out of scope: <...>
-'@ | Set-Content -LiteralPath $CoreFile
+'@ | Set-Content -LiteralPath $script:CoreFile
     }
-    Append-Pulse "SYSTEM" "INIT" "Initialized .pm ledger"
-    Cmd-Render "status.md"
+    Append-Pulse "SYSTEM" "INIT" "Initialized scoped ledger ($script:Scope)"
+    Cmd-Render
 }
 
 function Cmd-New([string]$StateInput, [string]$TitleInput, [string]$DepsInput = "") {
     Load-Meta
     Ensure-BaseFiles
+
     $state = Normalize-State $StateInput
     $title = Sanitize $TitleInput
     $deps = Sanitize $DepsInput
     $today = Get-NowDate
     $taskId = Format-TaskId $script:NextTaskNum
-    Add-Content -LiteralPath $TicketsFile -Value "$taskId`t$state`t$title`t$deps`t$today`t$today"
+
+    Add-Content -LiteralPath $script:TicketsFile -Value "$taskId`t$state`t$title`t$deps`t$today`t$today"
     $script:NextTaskNum++
     Save-Meta
+
     Append-Pulse $taskId "CREATE" "state=$state title=$title"
     Write-Output $taskId
 }
@@ -334,6 +513,7 @@ function Cmd-Move([string]$TaskId, [string]$StateInput, [string]$Note = "") {
     Load-Meta
     $newState = Normalize-State $StateInput
     $safeNote = Sanitize $Note
+
     $rows = Read-Tickets
     $found = $false
     foreach ($row in $rows) {
@@ -347,6 +527,7 @@ function Cmd-Move([string]$TaskId, [string]$StateInput, [string]$Note = "") {
     if (-not $found) {
         throw "error: task not found: $TaskId"
     }
+
     Write-Tickets $rows
     $details = "state=$newState"
     if ($safeNote -ne "") {
@@ -361,7 +542,7 @@ function Cmd-CriterionAdd([string]$TaskId, [string]$Text) {
         throw "error: task not found: $TaskId"
     }
     $safeText = Sanitize $Text
-    Add-Content -LiteralPath $CriteriaFile -Value "$TaskId`t0`t$safeText"
+    Add-Content -LiteralPath $script:CriteriaFile -Value "$TaskId`t0`t$safeText"
     Append-Pulse $TaskId "CRITERION_ADD" $safeText
 }
 
@@ -394,7 +575,8 @@ function Cmd-Evidence([string]$TaskId, [string]$Location, [string]$Note = "") {
     }
     $safeLocation = Sanitize $Location
     $safeNote = Sanitize $Note
-    Add-Content -LiteralPath $EvidenceFile -Value "$TaskId`t$(Get-NowDate)`t$safeLocation`t$safeNote"
+    Add-Content -LiteralPath $script:EvidenceFile -Value "$TaskId`t$(Get-NowDate)`t$safeLocation`t$safeNote"
+
     if ($safeNote -ne "") {
         Append-Pulse $TaskId "EVIDENCE" "$safeLocation - $safeNote"
     } else {
@@ -426,56 +608,72 @@ function Render-StateSection(
     [string]$State,
     [int]$Limit,
     [hashtable]$ClaimsByTask,
+    [string]$TicketHint,
     [System.Collections.Generic.List[string]]$OutLines
 ) {
     $OutLines.Add("### $(State-Heading $State)")
     $filtered = @($Rows | Where-Object { $_.state -eq $State })
     if ($filtered.Count -eq 0) {
         $OutLines.Add("- (none)")
-    } else {
-        $shown = $filtered
-        $hidden = 0
-        if ($Limit -gt 0 -and $filtered.Count -gt $Limit) {
-            $shown = @($filtered | Select-Object -First $Limit)
-            $hidden = $filtered.Count - $Limit
+        $OutLines.Add("")
+        return
+    }
+
+    $shown = $filtered
+    $hidden = 0
+    if ($Limit -gt 0 -and $filtered.Count -gt $Limit) {
+        $shown = @($filtered | Select-Object -First $Limit)
+        $hidden = $filtered.Count - $Limit
+    }
+
+    foreach ($row in $shown) {
+        $dep = ""
+        if ($row.deps -ne "") {
+            $dep = " (deps: $($row.deps))"
         }
-        foreach ($row in $shown) {
-            $dep = ""
-            if ($row.deps -ne "") {
-                $dep = " (deps: $($row.deps))"
-            }
-            $claim = ""
-            if ($State -ne "DONE" -and $ClaimsByTask.ContainsKey($row.id) -and $ClaimsByTask[$row.id] -ne "") {
-                $claim = " (claimed: $($ClaimsByTask[$row.id]))"
-            }
-            $OutLines.Add("- [ ] $($row.id) - $($row.title)$dep$claim")
+        $claim = ""
+        if ($State -ne "DONE" -and $ClaimsByTask.ContainsKey($row.id) -and $ClaimsByTask[$row.id] -ne "") {
+            $claim = " (claimed: $($ClaimsByTask[$row.id]))"
         }
-        if ($hidden -gt 0) {
-            $OutLines.Add("- ... +$hidden more (see .pm/tickets.tsv)")
-        }
+        $OutLines.Add("- [ ] $($row.id) - $($row.title)$dep$claim")
+    }
+
+    if ($hidden -gt 0) {
+        $OutLines.Add("- ... +$hidden more (see $TicketHint)")
     }
     $OutLines.Add("")
 }
 
-function Cmd-Render([string]$OutPath = "status.md") {
+function Cmd-Render([string]$OutPath = "") {
     Load-Meta
+
+    $explicit = $OutPath -ne ""
+    if (-not $explicit) {
+        $OutPath = Default-StatusOutputPath
+    }
+
     $nextTaskId = Format-TaskId $script:NextTaskNum
     $tickets = Read-Tickets
     $criteria = Read-Criteria
     $evidence = Read-Evidence
     $claimsByTask = Read-ClaimsMap
-    $lines = [System.Collections.Generic.List[string]]::new()
 
+    $ticketHint = Scoped-RelPath "tickets.tsv"
+    $evidenceHint = Scoped-RelPath "evidence.tsv"
+    $pulseHint = Scoped-RelPath "pulse.log"
+
+    $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add("# status.md")
     $lines.Add("## Project Pulse")
     $lines.Add("")
+    $lines.Add("Scope: $script:Scope")
     $lines.Add("Last updated: $(Get-NowDate)")
     $lines.Add("")
     $lines.Add("---")
     $lines.Add("")
 
-    if (Test-Path -LiteralPath $CoreFile) {
-        foreach ($line in Get-Content -LiteralPath $CoreFile) {
+    if (Test-Path -LiteralPath $script:CoreFile -PathType Leaf) {
+        foreach ($line in Get-Content -LiteralPath $script:CoreFile) {
             $lines.Add($line)
         }
         $lines.Add("")
@@ -497,34 +695,34 @@ function Cmd-Render([string]$OutPath = "status.md") {
     $lines.Add("")
     $lines.Add("## Current state (always keep accurate)")
     $lines.Add("")
-    Render-StateSection $tickets "NOW" 0 $claimsByTask $lines
-    Render-StateSection $tickets "IN_PROGRESS" 0 $claimsByTask $lines
-    Render-StateSection $tickets "BLOCKED" 0 $claimsByTask $lines
-    Render-StateSection $tickets "NEXT" $script:NextLimit $claimsByTask $lines
+
+    Render-StateSection $tickets "NOW" 0 $claimsByTask $ticketHint $lines
+    Render-StateSection $tickets "IN_PROGRESS" 0 $claimsByTask $ticketHint $lines
+    Render-StateSection $tickets "BLOCKED" 0 $claimsByTask $ticketHint $lines
+    Render-StateSection $tickets "NEXT" $script:NextLimit $claimsByTask $ticketHint $lines
+
     if ($script:NextLimit -gt 0) {
-        $lines.Add("> Next shows up to $script:NextLimit items; see .pm/tickets.tsv for full backlog")
+        $lines.Add("> Next shows up to $script:NextLimit items; see $ticketHint for full backlog")
         $lines.Add("")
     }
+
     $lines.Add("---")
     $lines.Add("")
     $lines.Add("## Acceptance criteria (required for active tasks)")
     $lines.Add("")
 
-    $active = $tickets | Where-Object { $_.state -ne "DONE" }
+    $active = @($tickets | Where-Object { $_.state -ne "DONE" })
     if ($active.Count -eq 0) {
         $lines.Add("_No active tasks_")
     } else {
         foreach ($task in $active) {
             $lines.Add("### $($task.id) acceptance criteria")
-            $taskCriteria = $criteria | Where-Object { $_.id -eq $task.id }
+            $taskCriteria = @($criteria | Where-Object { $_.id -eq $task.id })
             if ($taskCriteria.Count -eq 0) {
                 $lines.Add("- [ ] Add acceptance criteria")
             } else {
                 foreach ($criterion in $taskCriteria) {
-                    $mark = " "
-                    if ($criterion.done -eq "1") {
-                        $mark = "x"
-                    }
+                    $mark = if ($criterion.done -eq "1") { "x" } else { " " }
                     $lines.Add("- [$mark] $($criterion.text)")
                 }
             }
@@ -535,11 +733,12 @@ function Cmd-Render([string]$OutPath = "status.md") {
     $lines.Add("---")
     $lines.Add("")
     $lines.Add("## Evidence index (keep it navigable)")
-    $lines.Add("> Source of truth: .pm/evidence.tsv")
+    $lines.Add("> Source of truth: $evidenceHint")
     if ($script:EvidenceTail -gt 0) {
         $lines.Add("> Showing latest $script:EvidenceTail entries to keep status.md compact")
     }
     $lines.Add("")
+
     if ($evidence.Count -eq 0) {
         $lines.Add("- (none)")
     } else {
@@ -557,31 +756,129 @@ function Cmd-Render([string]$OutPath = "status.md") {
             $lines.Add("- $($ev.id): $($ev.location) ($($ev.date))$note")
         }
         if ($omittedEvidence -gt 0) {
-            $lines.Add("- ... +$omittedEvidence older entries (see .pm/evidence.tsv)")
+            $lines.Add("- ... +$omittedEvidence older entries (see $evidenceHint)")
         }
     }
+
     $lines.Add("")
     $lines.Add("---")
     $lines.Add("")
     $lines.Add("## Pulse Log (append-only)")
-    $lines.Add("> Source of truth: .pm/pulse.log (full history)")
+    $lines.Add("> Source of truth: $pulseHint (full history)")
     $lines.Add("> Showing latest $script:PulseTail entries to keep status.md compact")
     $lines.Add("")
 
-    if (-not (Test-Path -LiteralPath $PulseFile) -or (Get-Content -LiteralPath $PulseFile).Count -eq 0) {
+    if (-not (Test-Path -LiteralPath $script:PulseFile -PathType Leaf)) {
         $lines.Add("- (no entries)")
     } else {
-        $tail = Get-Content -LiteralPath $PulseFile | Select-Object -Last $script:PulseTail
-        foreach ($entry in $tail) {
-            $parts = $entry -split "\|", 4
-            while ($parts.Count -lt 4) {
-                $parts += ""
+        $pulseLines = Get-Content -LiteralPath $script:PulseFile
+        if ($pulseLines.Count -eq 0) {
+            $lines.Add("- (no entries)")
+        } else {
+            $tail = $pulseLines | Select-Object -Last $script:PulseTail
+            foreach ($entry in $tail) {
+                $parts = $entry -split "\|", 4
+                while ($parts.Count -lt 4) {
+                    $parts += ""
+                }
+                $lines.Add("- $($parts[0]) | $($parts[1]) | $($parts[2]) | $($parts[3])")
             }
-            $lines.Add("- $($parts[0]) | $($parts[1]) | $($parts[2]) | $($parts[3])")
         }
     }
 
     Set-Content -LiteralPath $OutPath -Value $lines
+
+    if (-not $explicit) {
+        Render-StatusIndexIfNeeded
+    }
+}
+
+function Cmd-RenderContext([string]$TaskId, [string]$EvidenceTailInput = "") {
+    Load-Meta
+
+    $tail = $script:ContextEvidenceTail
+    if ($EvidenceTailInput -ne "") {
+        $parsedTail = 0
+        if (-not [int]::TryParse($EvidenceTailInput, [ref]$parsedTail) -or $parsedTail -lt 0) {
+            throw "error: evidence-tail must be a non-negative integer"
+        }
+        $tail = $parsedTail
+    }
+
+    $task = Read-Tickets | Where-Object { $_.id -eq $TaskId } | Select-Object -First 1
+    if ($null -eq $task) {
+        throw "error: task not found: $TaskId"
+    }
+
+    $claims = Read-ClaimsMap
+    $owner = if ($claims.ContainsKey($TaskId) -and $claims[$TaskId] -ne "") { $claims[$TaskId] } else { "" }
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("# Context Pack")
+    $lines.Add("")
+    $lines.Add("Scope: $script:Scope")
+    $lines.Add("Task ID: $($task.id)")
+    $lines.Add("State: $($task.state)")
+    $lines.Add("Title: $($task.title)")
+    if ($task.deps -ne "") {
+        $lines.Add("Dependencies: $($task.deps)")
+    } else {
+        $lines.Add("Dependencies: (none)")
+    }
+    if ($owner -ne "") {
+        $lines.Add("Claimed by: $owner")
+    } else {
+        $lines.Add("Claimed by: (unclaimed)")
+    }
+    $lines.Add("Updated: $($task.updated)")
+    $lines.Add("")
+
+    $lines.Add("## Acceptance Criteria")
+    $taskCriteria = @(Read-Criteria | Where-Object { $_.id -eq $TaskId })
+    if ($taskCriteria.Count -eq 0) {
+        $lines.Add("- [ ] Add acceptance criteria")
+    } else {
+        foreach ($criterion in $taskCriteria) {
+            $mark = if ($criterion.done -eq "1") { "x" } else { " " }
+            $lines.Add("- [$mark] $($criterion.text)")
+        }
+    }
+    $lines.Add("")
+
+    $lines.Add("## Latest Evidence")
+    $taskEvidence = @(Read-Evidence | Where-Object { $_.id -eq $TaskId })
+    if ($taskEvidence.Count -eq 0) {
+        $lines.Add("- (none)")
+    } else {
+        $rows = $taskEvidence
+        $omitted = 0
+        if ($tail -gt 0 -and $taskEvidence.Count -gt $tail) {
+            $rows = @($taskEvidence | Select-Object -Last $tail)
+            $omitted = $taskEvidence.Count - $tail
+        }
+        foreach ($ev in $rows) {
+            $note = ""
+            if ($ev.note -ne "") {
+                $note = " - $($ev.note)"
+            }
+            $lines.Add("- $($ev.id): $($ev.location) ($($ev.date))$note")
+        }
+        if ($omitted -gt 0) {
+            $lines.Add("- ... +$omitted older entries (see $(Scoped-RelPath 'evidence.tsv'))")
+        }
+    }
+    $lines.Add("")
+
+    $lines.Add("## Paths")
+    $lines.Add("- Tickets: $(Scoped-RelPath 'tickets.tsv')")
+    $lines.Add("- Criteria: $(Scoped-RelPath 'criteria.tsv')")
+    $lines.Add("- Evidence: $(Scoped-RelPath 'evidence.tsv')")
+    $lines.Add("- Pulse: $(Scoped-RelPath 'pulse.log')")
+    if (Test-Path -LiteralPath $script:ClaimsFile -PathType Leaf) {
+        $lines.Add("- Claims: $(Scoped-RelPath 'claims.tsv')")
+    }
+
+    $lines | Write-Output
 }
 
 function Cmd-NextId {
@@ -589,15 +886,19 @@ function Cmd-NextId {
     Write-Output (Format-TaskId $script:NextTaskNum)
 }
 
-if ($args.Count -lt 1) {
+$remainingArgs = Parse-GlobalOptions $args
+Set-ScopePaths
+Migrate-LegacyDefaultScope
+
+if ($remainingArgs.Count -lt 1) {
     Write-Usage
     exit 1
 }
 
-$command = $args[0]
+$command = $remainingArgs[0]
 $rest = @()
-if ($args.Count -gt 1) {
-    $rest = $args[1..($args.Count - 1)]
+if ($remainingArgs.Count -gt 1) {
+    $rest = $remainingArgs[1..($remainingArgs.Count - 1)]
 }
 
 try {
@@ -607,14 +908,12 @@ try {
         }
         "new" {
             if ($rest.Count -lt 2) { throw "error: new requires <state> and <title>" }
-            $deps = ""
-            if ($rest.Count -ge 3) { $deps = $rest[2] }
+            $deps = if ($rest.Count -ge 3) { $rest[2] } else { "" }
             Cmd-New $rest[0] $rest[1] $deps
         }
         "move" {
             if ($rest.Count -lt 2) { throw "error: move requires <id> and <state>" }
-            $note = ""
-            if ($rest.Count -ge 3) { $note = $rest[2] }
+            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
             Cmd-Move $rest[0] $rest[1] $note
         }
         "criterion-add" {
@@ -627,14 +926,12 @@ try {
         }
         "evidence" {
             if ($rest.Count -lt 2) { throw "error: evidence requires <id> and <path-or-link>" }
-            $note = ""
-            if ($rest.Count -ge 3) { $note = $rest[2] }
+            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
             Cmd-Evidence $rest[0] $rest[1] $note
         }
         "done" {
             if ($rest.Count -lt 2) { throw "error: done requires <id> and <path-or-link>" }
-            $note = ""
-            if ($rest.Count -ge 3) { $note = $rest[2] }
+            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
             Cmd-Done $rest[0] $rest[1] $note
         }
         "list" {
@@ -650,6 +947,11 @@ try {
             } else {
                 Cmd-Render
             }
+        }
+        "render-context" {
+            if ($rest.Count -lt 1) { throw "error: render-context requires <task-id>" }
+            $tail = if ($rest.Count -ge 2) { $rest[1] } else { "" }
+            Cmd-RenderContext $rest[0] $tail
         }
         "next-id" {
             Cmd-NextId
