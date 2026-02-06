@@ -750,6 +750,7 @@ cmd_render() {
     echo
     echo "Scope: $SCOPE"
     echo "Last updated: $(now_date)"
+    echo "> Generated from $(scoped_rel_path "tickets.tsv"), $(scoped_rel_path "criteria.tsv"), $(scoped_rel_path "evidence.tsv"), and $(scoped_rel_path "pulse.log"); do not hand-edit."
     echo
     echo "---"
     echo

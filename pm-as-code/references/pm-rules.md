@@ -11,6 +11,7 @@
 - [Session Protocol](#session-protocol)
 - [Append-Only Rule](#append-only-rule)
 - [Compact Ledger Mode](#compact-ledger-mode)
+- [Concurrency Policy](#concurrency-policy)
 
 ## Non-negotiables
 
@@ -140,3 +141,21 @@ Rules:
 - Use scope selection (`--scope` or `PM_SCOPE`) to isolate teams/swarm lanes.
 - Use `scripts/pm-ticket.sh` (Bash) or `scripts/pm-ticket.ps1` / `scripts/pm-ticket.cmd` (Windows) for all ledger operations to keep format stable.
 - For multi-agent locking, use `scripts/pm-collab.sh` (Bash) or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd` (Windows).
+- Generated snapshots should not be hand-edited; use ticket/collab scripts and re-render.
+
+## Concurrency Policy
+
+For concurrent updates, default to no-confirm auto-merge behavior:
+- Re-read latest `status.md` immediately before write.
+- Apply minimal ID-targeted changes for owned task only.
+- Preserve unrelated edits untouched.
+- Do not interrupt flow for non-conflicting changes.
+
+Escalate only for same-task ambiguity:
+- target ID missing
+- duplicated ID
+- target criteria block cannot be mapped safely
+
+When escalated:
+- create `Resolve status conflict for <ID>` task
+- move original task to `Blocked` with explicit blocker note

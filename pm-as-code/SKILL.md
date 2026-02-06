@@ -50,6 +50,29 @@ Use multi-agent mode for shared workspaces:
 - `scripts/pm-collab.ps1` or `scripts/pm-collab.cmd` (Windows)
 - Run all writes through collab wrappers (lock + per-task claim).
 
+## Concurrency Policy
+
+Concurrent edits are expected in multi-agent work.
+
+Default behavior:
+- Do not ask for confirmation on non-conflicting concurrent edits.
+- Re-read latest `status.md` before writing.
+- Apply minimal ID-targeted updates for owned task only:
+  - mark task checkbox done
+  - mark acceptance criteria done
+  - add evidence for that task
+  - append one pulse entry for that task
+- Keep unrelated tasks/sections untouched.
+
+Escalate only on true same-task conflicts:
+- target task ID missing
+- duplicated task ID
+- acceptance criteria block for that ID cannot be mapped safely
+
+If conflict is true same-task:
+- create a new task `Resolve status conflict for <ID>`
+- move original task to `Blocked` with blocker noted
+
 For teammate handoffs, use a bounded task pack:
 - `scripts/pm-ticket.sh [--scope <name>] render-context <T-0001> [evidence-tail]`
 - `scripts/pm-ticket.ps1 [--scope <name>] render-context <T-0001> [evidence-tail]`

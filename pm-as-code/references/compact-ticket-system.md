@@ -29,6 +29,7 @@ Rendering behavior:
 
 - Only `default` scope exists: `status.md` is the full snapshot.
 - Multiple scopes or non-default-only scopes: `status.md` is a compact index linking to `status.<scope>.md`.
+- Rendered snapshots include a generated banner; do not hand-edit.
 
 ## Render Bounds
 

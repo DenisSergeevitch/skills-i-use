@@ -668,6 +668,7 @@ function Cmd-Render([string]$OutPath = "") {
     $lines.Add("")
     $lines.Add("Scope: $script:Scope")
     $lines.Add("Last updated: $(Get-NowDate)")
+    $lines.Add("> Generated from $(Scoped-RelPath 'tickets.tsv'), $(Scoped-RelPath 'criteria.tsv'), $(Scoped-RelPath 'evidence.tsv'), and $(Scoped-RelPath 'pulse.log'); do not hand-edit.")
     $lines.Add("")
     $lines.Add("---")
     $lines.Add("")
