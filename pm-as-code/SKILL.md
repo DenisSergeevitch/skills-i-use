@@ -15,9 +15,12 @@ description: "Strict Markdown project management with status.md as the canonical
 - Keep acceptance criteria for active tasks keyed by task ID.
 - Treat Pulse history as append-only.
 - Resolve ambiguity by updating docs, never by relying on chat memory.
-- Route every state mutation through scripts:
-  - single-agent: `scripts/pm-ticket.sh` or `scripts/pm-ticket.ps1` / `scripts/pm-ticket.cmd`
-  - multi-agent: `scripts/pm-collab.sh` or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd`
+- Route every state mutation through collab wrappers by default:
+  - `scripts/pm-collab.sh` (Bash)
+  - `scripts/pm-collab.ps1` or `scripts/pm-collab.cmd` (Windows)
+- Use `pm-collab run <pm-ticket command...>`; it auto-resolves agent identity and auto-claims task IDs when needed.
+- Agent identity resolution order: `PM_AGENT` -> `CODEX_THREAD_ID` -> `CLAUDE_SESSION_ID` -> host fallback.
+- Use `pm-ticket.*` directly only for read-only/status commands or maintenance.
 
 ## Done Gate
 
@@ -31,17 +34,17 @@ A task is done only when all are true:
 ## Session Loop
 
 1. Read `status.md`.
-2. Ensure scope is initialized (`pm-ticket ... init`) and select scope (`--scope` or `PM_SCOPE`).
-3. Execute one active task ID (prefer `Now`) using ticket/collab commands only.
-4. If new work appears, create a new task ID immediately via script command.
-5. If blocked, move task to `Blocked` with explicit blocker text via script command.
-6. On completion, run the Done Gate and render via script.
+2. Ensure scope is initialized (`pm-collab ... init`) and select scope (`--scope` or `PM_SCOPE`).
+3. Execute one active task ID (prefer `Now`) with `pm-collab run ...`.
+4. If new work appears, create a new task ID immediately via `pm-collab run new ...`.
+5. If blocked, move task to `Blocked` with explicit blocker text via `pm-collab run move ...`.
+6. On completion, run the Done Gate through `pm-collab run done ...` (render is automatic).
 
 ## Mode Selection
 
 Use ledger mode by default:
-- `scripts/pm-ticket.sh` (Bash)
-- `scripts/pm-ticket.ps1` or `scripts/pm-ticket.cmd` (Windows)
+- `scripts/pm-collab.sh` (Bash)
+- `scripts/pm-collab.ps1` or `scripts/pm-collab.cmd` (Windows)
 - Prefer scoped ledgers for parallel teams: `--scope <name>` (or `PM_SCOPE`).
 - Ledger files in `.pm/scopes/<scope>/*` are the machine record.
 - Manual edits to `status.md` are forbidden; script render is authoritative.
@@ -49,10 +52,9 @@ Use ledger mode by default:
   - single default scope: full snapshot
   - multiple scopes (or non-default only): compact scope index to `status.<scope>.md`
 
-Use multi-agent mode for shared workspaces:
-- `scripts/pm-collab.sh` (Bash)
-- `scripts/pm-collab.ps1` or `scripts/pm-collab.cmd` (Windows)
-- Run all writes through collab wrappers (lock + per-task claim).
+Notes:
+- `pm-collab run ...` works for both single-agent and multi-agent workflows.
+- Explicit `claim`/`unclaim` remains available for manual reservation control.
 
 ## Concurrency Policy
 

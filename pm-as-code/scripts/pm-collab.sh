@@ -24,18 +24,21 @@ usage() {
   cat <<'EOF_USAGE'
 Usage:
   pm-collab.sh [--scope <name>] init
+  pm-collab.sh [--scope <name>] claim <T-0001> [note]
   pm-collab.sh [--scope <name>] claim <agent> <T-0001> [note]
+  pm-collab.sh [--scope <name>] unclaim <T-0001>
   pm-collab.sh [--scope <name>] unclaim <agent> <T-0001>
   pm-collab.sh [--scope <name>] claims
-  pm-collab.sh [--scope <name>] run <agent> -- <pm-ticket command...>
+  pm-collab.sh [--scope <name>] run [<agent>] -- <pm-ticket command...>
+  pm-collab.sh [--scope <name>] run <pm-ticket command...>
   pm-collab.sh [--scope <name>] lock-info
   pm-collab.sh [--scope <name>] unlock-stale
 
 Examples:
   scripts/pm-collab.sh --scope backend init
+  scripts/pm-collab.sh --scope backend run move T-0001 in-progress
+  scripts/pm-collab.sh --scope backend run done T-0001 "src/api/auth.ts" "tests passed"
   scripts/pm-collab.sh --scope backend claim agent-a T-0001 "taking API task"
-  scripts/pm-collab.sh --scope backend run agent-a -- move T-0001 in-progress
-  scripts/pm-collab.sh --scope backend run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
 EOF_USAGE
 }
 
@@ -48,6 +51,35 @@ sanitize() {
   s="${s//$'\t'/ }"
   s="${s//$'\n'/ }"
   printf '%s' "$s"
+}
+
+default_agent_name() {
+  local value
+
+  if [[ -n "${PM_AGENT:-}" ]]; then
+    printf '%s' "$(sanitize "$PM_AGENT")"
+    return
+  fi
+
+  if [[ -n "${CODEX_THREAD_ID:-}" ]]; then
+    value="codex-${CODEX_THREAD_ID%%-*}"
+    printf '%s' "$(sanitize "$value")"
+    return
+  fi
+
+  if [[ -n "${CLAUDE_SESSION_ID:-}" ]]; then
+    value="claude-${CLAUDE_SESSION_ID%%-*}"
+    printf '%s' "$(sanitize "$value")"
+    return
+  fi
+
+  value="${USER:-agent}@$(hostname):${PPID:-$$}"
+  printf '%s' "$(sanitize "$value")"
+}
+
+looks_like_task_id() {
+  local value="${1:-}"
+  [[ "$value" =~ ^T-[0-9]{4}$ ]]
 }
 
 validate_scope_name() {
@@ -320,6 +352,17 @@ task_id_from_pm_command() {
   esac
 }
 
+is_pm_ticket_command() {
+  case "${1:-}" in
+    init|new|move|criterion-add|criterion-check|evidence|done|list|render|render-context|next-id)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 is_mutating_pm_command() {
   case "${1:-}" in
     init|new|move|criterion-add|criterion-check|evidence|done|render)
@@ -331,20 +374,30 @@ is_mutating_pm_command() {
   esac
 }
 
-ensure_task_claimed_by_agent() {
+ensure_task_claimed_or_auto() {
   local agent="$1"
   local task_id="$2"
-  local owner
+  local pm_cmd="$3"
+  local owner state note
 
   owner="$(claim_owner "$task_id" || true)"
-  if [[ -z "$owner" ]]; then
-    echo "error: $task_id is not claimed. Run: scripts/pm-collab.sh --scope $SCOPE claim $agent $task_id" >&2
+  if [[ -n "$owner" ]]; then
+    if [[ "$owner" != "$agent" ]]; then
+      echo "error: $task_id is claimed by '$owner' (agent '$agent' cannot modify it)" >&2
+      exit 1
+    fi
+    return
+  fi
+
+  state="$(ticket_state "$task_id")"
+  if [[ "$state" == "DONE" ]]; then
+    echo "error: cannot auto-claim completed task $task_id" >&2
     exit 1
   fi
-  if [[ "$owner" != "$agent" ]]; then
-    echo "error: $task_id is claimed by '$owner' (agent '$agent' cannot modify it)" >&2
-    exit 1
-  fi
+
+  note="auto-claim via run $pm_cmd"
+  printf '%s\t%s\t%s\t%s\n' "$task_id" "$agent" "$(now_ts)" "$note" >>"$CLAIMS_FILE"
+  append_pulse "$task_id" "CLAIM" "agent=$agent auto=1 command=$pm_cmd"
 }
 
 cmd_init() {
@@ -458,16 +511,36 @@ cmd_unlock_stale() {
 }
 
 cmd_run() {
-  local agent="$1"
-  shift
+  local agent=""
   local pm_cmd task_id
+
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  elif is_pm_ticket_command "${1:-}"; then
+    :
+  else
+    agent="$1"
+    shift
+  fi
 
   if [[ "${1:-}" == "--" ]]; then
     shift
   fi
+
   if [[ $# -lt 1 ]]; then
     usage
     exit 1
+  fi
+
+  if [[ -z "$agent" ]]; then
+    agent="$(default_agent_name)"
+  else
+    agent="$(sanitize "$agent")"
   fi
 
   pm_cmd="$1"
@@ -480,7 +553,7 @@ cmd_run() {
   fi
 
   if [[ -n "$task_id" ]]; then
-    ensure_task_claimed_by_agent "$agent" "$task_id"
+    ensure_task_claimed_or_auto "$agent" "$task_id" "$pm_cmd"
   fi
 
   invoke_pm_ticket "$@"
@@ -518,18 +591,34 @@ main() {
       cmd_init
       ;;
     claim)
-      [[ $# -lt 2 ]] && { usage; exit 1; }
-      cmd_claim "$1" "$2" "${3:-}"
+      if [[ $# -lt 1 ]]; then
+        usage
+        exit 1
+      fi
+      if looks_like_task_id "${1:-}"; then
+        cmd_claim "$(default_agent_name)" "$1" "${2:-}"
+      else
+        [[ $# -lt 2 ]] && { usage; exit 1; }
+        cmd_claim "$1" "$2" "${3:-}"
+      fi
       ;;
     unclaim)
-      [[ $# -lt 2 ]] && { usage; exit 1; }
-      cmd_unclaim "$1" "$2"
+      if [[ $# -lt 1 ]]; then
+        usage
+        exit 1
+      fi
+      if looks_like_task_id "${1:-}"; then
+        cmd_unclaim "$(default_agent_name)" "$1"
+      else
+        [[ $# -lt 2 ]] && { usage; exit 1; }
+        cmd_unclaim "$1" "$2"
+      fi
       ;;
     claims)
       cmd_claims
       ;;
     run)
-      [[ $# -lt 2 ]] && { usage; exit 1; }
+      [[ $# -lt 1 ]] && { usage; exit 1; }
       cmd_run "$@"
       ;;
     lock-info)

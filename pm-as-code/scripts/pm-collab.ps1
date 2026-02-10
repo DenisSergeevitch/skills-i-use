@@ -34,18 +34,21 @@ function Write-Usage {
     @'
 Usage:
   pm-collab.ps1 [--scope <name>] init
+  pm-collab.ps1 [--scope <name>] claim <T-0001> [note]
   pm-collab.ps1 [--scope <name>] claim <agent> <T-0001> [note]
+  pm-collab.ps1 [--scope <name>] unclaim <T-0001>
   pm-collab.ps1 [--scope <name>] unclaim <agent> <T-0001>
   pm-collab.ps1 [--scope <name>] claims
-  pm-collab.ps1 [--scope <name>] run <agent> -- <pm-ticket command...>
+  pm-collab.ps1 [--scope <name>] run [<agent>] -- <pm-ticket command...>
+  pm-collab.ps1 [--scope <name>] run <pm-ticket command...>
   pm-collab.ps1 [--scope <name>] lock-info
   pm-collab.ps1 [--scope <name>] unlock-stale
 
 Examples:
   scripts/pm-collab.ps1 --scope backend init
+  scripts/pm-collab.ps1 --scope backend run move T-0001 in-progress
+  scripts/pm-collab.ps1 --scope backend run done T-0001 "src/api/auth.ts" "tests passed"
   scripts/pm-collab.ps1 --scope backend claim agent-a T-0001 "taking API task"
-  scripts/pm-collab.ps1 --scope backend run agent-a -- move T-0001 in-progress
-  scripts/pm-collab.ps1 --scope backend run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
 '@ | Write-Output
 }
 
@@ -58,6 +61,37 @@ function Sanitize([string]$Text) {
         return ""
     }
     return ($Text -replace "`t", " " -replace "`r", " " -replace "`n", " ")
+}
+
+function Get-DefaultAgentName {
+    if ($env:PM_AGENT) {
+        return (Sanitize $env:PM_AGENT)
+    }
+    if ($env:CODEX_THREAD_ID) {
+        $head = ($env:CODEX_THREAD_ID -split "-", 2)[0]
+        return (Sanitize "codex-$head")
+    }
+    if ($env:CLAUDE_SESSION_ID) {
+        $head = ($env:CLAUDE_SESSION_ID -split "-", 2)[0]
+        return (Sanitize "claude-$head")
+    }
+
+    $parentPid = ""
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop
+        if ($null -ne $proc -and $proc.ParentProcessId) {
+            $parentPid = [string]$proc.ParentProcessId
+        }
+    } catch {
+        $parentPid = ""
+    }
+    if ($parentPid -eq "") {
+        $parentPid = [string]$PID
+    }
+
+    $user = if ($env:USERNAME) { $env:USERNAME } else { "agent" }
+    $hostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
+    return (Sanitize "$user@$hostName:$parentPid")
 }
 
 function Validate-ScopeName([string]$Name) {
@@ -394,6 +428,30 @@ function TaskId-FromPMCommand([string]$PMCmd, [string]$MaybeId = "") {
     }
 }
 
+function Is-PMTicketCommand([string]$PMCmd) {
+    switch ($PMCmd) {
+        "init" { return $true }
+        "new" { return $true }
+        "move" { return $true }
+        "criterion-add" { return $true }
+        "criterion-check" { return $true }
+        "evidence" { return $true }
+        "done" { return $true }
+        "list" { return $true }
+        "render" { return $true }
+        "render-context" { return $true }
+        "next-id" { return $true }
+        default { return $false }
+    }
+}
+
+function Looks-LikeTaskId([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    return ($Value -match "^T-\d{4}$")
+}
+
 function Is-MutatingPMCommand([string]$PMCmd) {
     switch ($PMCmd) {
         "init" { return $true }
@@ -408,14 +466,23 @@ function Is-MutatingPMCommand([string]$PMCmd) {
     }
 }
 
-function Ensure-TaskClaimedByAgent([string]$Agent, [string]$TaskId) {
+function Ensure-TaskClaimedOrAuto([string]$Agent, [string]$TaskId, [string]$PMCmd) {
     $owner = Claim-Owner $TaskId
-    if ($owner -eq "") {
-        throw "error: $TaskId is not claimed. Run: scripts/pm-collab.ps1 --scope $script:Scope claim $Agent $TaskId"
+    if ($owner -ne "") {
+        if ($owner -ne $Agent) {
+            throw "error: $TaskId is claimed by '$owner' (agent '$Agent' cannot modify it)"
+        }
+        return
     }
-    if ($owner -ne $Agent) {
-        throw "error: $TaskId is claimed by '$owner' (agent '$Agent' cannot modify it)"
+
+    $state = Ticket-State $TaskId
+    if ($state -eq "DONE") {
+        throw "error: cannot auto-claim completed task $TaskId"
     }
+
+    $note = "auto-claim via run $PMCmd"
+    Add-Content -LiteralPath $script:ClaimsFile -Value "$TaskId`t$Agent`t$(Get-NowTs)`t$note"
+    Append-Pulse $TaskId "CLAIM" "agent=$Agent auto=1 command=$PMCmd"
 }
 
 function Get-PowerShellExe {
@@ -559,16 +626,42 @@ function Cmd-UnlockStale {
     throw "error: lock is active and not stale"
 }
 
-function Cmd-Run([string]$Agent, [string[]]$PMArgs) {
-    $argsList = @($PMArgs)
+function Cmd-Run([string[]]$RunArgs) {
+    $argsList = @($RunArgs)
+    if ($argsList.Count -lt 1) {
+        throw "error: run requires a pm-ticket command"
+    }
+
+    $agent = ""
+    if ($argsList[0] -eq "--") {
+        if ($argsList.Count -eq 1) {
+            throw "error: run requires a pm-ticket command"
+        }
+        $argsList = @($argsList[1..($argsList.Count - 1)])
+    } elseif (Is-PMTicketCommand $argsList[0]) {
+        # auto-agent path
+    } else {
+        $agent = $argsList[0]
+        if ($argsList.Count -eq 1) {
+            throw "error: run requires a pm-ticket command"
+        }
+        $argsList = @($argsList[1..($argsList.Count - 1)])
+    }
+
     if ($argsList.Count -gt 0 -and $argsList[0] -eq "--") {
         if ($argsList.Count -eq 1) {
             throw "error: run requires a pm-ticket command"
         }
-        $argsList = $argsList[1..($argsList.Count - 1)]
+        $argsList = @($argsList[1..($argsList.Count - 1)])
     }
     if ($argsList.Count -lt 1) {
         throw "error: run requires a pm-ticket command"
+    }
+
+    if ($agent -eq "") {
+        $agent = Get-DefaultAgentName
+    } else {
+        $agent = Sanitize $agent
     }
 
     $pmCmd = $argsList[0]
@@ -579,7 +672,7 @@ function Cmd-Run([string]$Agent, [string[]]$PMArgs) {
         $taskId = TaskId-FromPMCommand $pmCmd ""
     }
 
-    Acquire-Lock $Agent
+    Acquire-Lock $agent
     try {
         if ($pmCmd -ne "init") {
             Ensure-PMInitialized
@@ -587,16 +680,16 @@ function Cmd-Run([string]$Agent, [string[]]$PMArgs) {
         }
 
         if ($taskId -ne "") {
-            Ensure-TaskClaimedByAgent $Agent $taskId
+            Ensure-TaskClaimedOrAuto $agent $taskId $pmCmd
         }
 
         Invoke-PMTicket $argsList
 
         if ($taskId -ne "" -and $pmCmd -eq "done") {
             $owner = Claim-Owner $taskId
-            if ($owner -eq $Agent) {
+            if ($owner -eq $agent) {
                 Remove-Claim $taskId
-                Append-Pulse $taskId "UNCLAIM" "auto-release on done by $Agent"
+                Append-Pulse $taskId "UNCLAIM" "auto-release on done by $agent"
             }
         }
 
@@ -630,25 +723,31 @@ try {
             Cmd-Init
         }
         "claim" {
-            if ($rest.Count -lt 2) { throw "error: claim requires <agent> <task-id>" }
-            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
-            Cmd-Claim $rest[0] $rest[1] $note
+            if ($rest.Count -lt 1) { throw "error: claim requires <task-id> or <agent> <task-id>" }
+            if (Looks-LikeTaskId $rest[0]) {
+                $note = if ($rest.Count -ge 2) { $rest[1] } else { "" }
+                Cmd-Claim (Get-DefaultAgentName) $rest[0] $note
+            } else {
+                if ($rest.Count -lt 2) { throw "error: claim requires <agent> <task-id>" }
+                $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
+                Cmd-Claim $rest[0] $rest[1] $note
+            }
         }
         "unclaim" {
-            if ($rest.Count -lt 2) { throw "error: unclaim requires <agent> <task-id>" }
-            Cmd-Unclaim $rest[0] $rest[1]
+            if ($rest.Count -lt 1) { throw "error: unclaim requires <task-id> or <agent> <task-id>" }
+            if (Looks-LikeTaskId $rest[0]) {
+                Cmd-Unclaim (Get-DefaultAgentName) $rest[0]
+            } else {
+                if ($rest.Count -lt 2) { throw "error: unclaim requires <agent> <task-id>" }
+                Cmd-Unclaim $rest[0] $rest[1]
+            }
         }
         "claims" {
             Cmd-Claims
         }
         "run" {
-            if ($rest.Count -lt 2) { throw "error: run requires <agent> and command args" }
-            $agent = $rest[0]
-            $runArgs = @()
-            if ($rest.Count -gt 1) {
-                $runArgs = $rest[1..($rest.Count - 1)]
-            }
-            Cmd-Run $agent $runArgs
+            if ($rest.Count -lt 1) { throw "error: run requires command args" }
+            Cmd-Run $rest
         }
         "lock-info" {
             Cmd-LockInfo

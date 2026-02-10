@@ -128,6 +128,10 @@ function Get-RecommendedPmTicketCommand {
     return "scripts\pm-ticket.cmd --scope $script:Scope <command>"
 }
 
+function Get-RecommendedPmCollabCommand {
+    return "scripts\pm-collab.cmd --scope $script:Scope run <pm-ticket command...>"
+}
+
 function Migrate-LegacyDefaultScope {
     if ($script:Scope -ne "default") {
         return
@@ -679,11 +683,12 @@ function Cmd-Render([string]$OutPath = "") {
     $lines.Add("Scope: $script:Scope")
     $lines.Add("Last updated: $(Get-NowDate)")
     $lines.Add("> Generated from $(Scoped-RelPath 'tickets.tsv'), $(Scoped-RelPath 'criteria.tsv'), $(Scoped-RelPath 'evidence.tsv'), and $(Scoped-RelPath 'pulse.log'); do not hand-edit.")
-    $lines.Add("> Write policy: never edit status.md manually; use $(Get-RecommendedPmTicketCommand)")
+    $lines.Add("> Write policy: never edit status.md manually; use $(Get-RecommendedPmCollabCommand)")
+    $lines.Add("> Direct maintenance path: $(Get-RecommendedPmTicketCommand)")
     $lines.Add("> Bloat metric: $totalTickets tickets (threshold: $script:BloatTicketThreshold)")
     if ($script:BloatTicketThreshold -gt 0 -and $totalTickets -ge $script:BloatTicketThreshold) {
-        $lines.Add("> Threshold reached: use pm-ticket CLI for updates.")
-        $lines.Add("> Recommended command: $(Get-RecommendedPmTicketCommand)")
+        $lines.Add("> Threshold reached: use collab CLI for updates.")
+        $lines.Add("> Recommended command: $(Get-RecommendedPmCollabCommand)")
     }
     $lines.Add("")
     $lines.Add("---")

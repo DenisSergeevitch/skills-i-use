@@ -24,17 +24,19 @@ Core behavior:
 - Active tasks must have acceptance criteria.
 - Completion requires evidence and an append-only Pulse entry.
 
-Execution modes:
-- Single-agent mode: use `scripts/pm-ticket.sh` (Bash) or `scripts/pm-ticket.ps1` / `scripts/pm-ticket.cmd` (Windows) for all state changes.
-- Multi-agent mode (no Git needed): use `scripts/pm-collab.sh` or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd` for lock + per-task claim workflow in shared folders.
+Execution path:
+- Default for all writes (single-agent and multi-agent): `scripts/pm-collab.sh` or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd`.
+- Use `pm-collab run <pm-ticket command...>`; it auto-resolves agent identity and auto-claims task IDs when needed.
+- Agent identity resolution order: `PM_AGENT` -> `CODEX_THREAD_ID` -> `CLAUDE_SESSION_ID` -> host fallback.
+- Use `pm-ticket.*` directly only for read-only/status operations or maintenance.
 - `status.md` is generated output; do not edit it manually.
-- Rendered status headers include a bloat metric (`BLOAT_TICKET_THRESHOLD`, default `50`) and print an OS-appropriate `pm-ticket` command once the threshold is reached.
+- Rendered status headers include a bloat metric (`BLOAT_TICKET_THRESHOLD`, default `50`) and print an OS-appropriate `pm-collab run` command once the threshold is reached.
 
 Typical flow:
 1. Read `status.md`.
-2. Work one active task ID at a time.
-3. Update criteria, evidence, and state transitions as work progresses.
-4. Render/update status and append Pulse history.
+2. Initialize once with `pm-collab ... init`.
+3. Work one active task ID at a time via `pm-collab run ...`.
+4. Let collab wrapper auto-render status and append Pulse history.
 
 ## Best Practice (Optional)
 

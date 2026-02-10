@@ -130,6 +130,14 @@ recommended_pm_ticket_command() {
   fi
 }
 
+recommended_pm_collab_command() {
+  if [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* || "${OSTYPE:-}" == win32* ]]; then
+    printf 'scripts\\pm-collab.cmd --scope %s run <pm-ticket command...>' "$SCOPE"
+  else
+    printf 'scripts/pm-collab.sh --scope %s run <pm-ticket command...>' "$SCOPE"
+  fi
+}
+
 migrate_legacy_default_scope() {
   if [[ "$SCOPE" != "default" ]]; then
     return
@@ -765,11 +773,12 @@ cmd_render() {
     echo "Scope: $SCOPE"
     echo "Last updated: $(now_date)"
     echo "> Generated from $(scoped_rel_path "tickets.tsv"), $(scoped_rel_path "criteria.tsv"), $(scoped_rel_path "evidence.tsv"), and $(scoped_rel_path "pulse.log"); do not hand-edit."
-    echo "> Write policy: never edit status.md manually; use $(recommended_pm_ticket_command)"
+    echo "> Write policy: never edit status.md manually; use $(recommended_pm_collab_command)"
+    echo "> Direct maintenance path: $(recommended_pm_ticket_command)"
     echo "> Bloat metric: $total_tickets tickets (threshold: $BLOAT_TICKET_THRESHOLD)"
     if ((BLOAT_TICKET_THRESHOLD > 0 && total_tickets >= BLOAT_TICKET_THRESHOLD)); then
-      echo "> Threshold reached: use pm-ticket CLI for updates."
-      echo "> Recommended command: $(recommended_pm_ticket_command)"
+      echo "> Threshold reached: use collab CLI for updates."
+      echo "> Recommended command: $(recommended_pm_collab_command)"
     fi
     echo
     echo "---"

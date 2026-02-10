@@ -15,7 +15,8 @@ Read `status.md`, but never edit it manually.
 - `status.md` plus `status.<scope>.md`: rendered snapshots/index.
 
 `status.md` remains the human entrypoint. `.pm/scopes/<scope>/*` is the machine system of record.
-All mutations must go through `scripts/pm-ticket.*` or `scripts/pm-collab.*`, then render snapshots.
+All mutations should go through `scripts/pm-collab.* run <pm-ticket command...>`; wrappers handle lock + claim + render.
+Use `scripts/pm-ticket.*` directly only for read-only/status operations or maintenance.
 
 ## Scope / Team Namespace
 
@@ -26,6 +27,12 @@ Use a scope for each team/swarm lane:
 - Default when omitted: `default`
 
 Scope data lives in `.pm/scopes/<scope>/...`.
+
+Agent identity for `pm-collab run` resolves in this order:
+- `PM_AGENT` (explicit override)
+- `CODEX_THREAD_ID` (Codex sessions)
+- `CLAUDE_SESSION_ID` (Claude sessions)
+- fallback host identity (`user@host:<parent-pid>`)
 
 Rendering behavior:
 
@@ -111,36 +118,33 @@ macOS/Linux (Bash):
 
 ```bash
 scripts/pm-collab.sh init
-scripts/pm-collab.sh claim agent-a T-0001 "API work"
-scripts/pm-collab.sh run agent-a -- move T-0001 in-progress
-scripts/pm-collab.sh run agent-a -- criterion-check T-0001 1
-scripts/pm-collab.sh run agent-a -- done T-0001 "src/api/auth.ts" "tests passed"
+scripts/pm-collab.sh run move T-0001 in-progress
+scripts/pm-collab.sh run criterion-check T-0001 1
+scripts/pm-collab.sh run done T-0001 "src/api/auth.ts" "tests passed"
 scripts/pm-collab.sh claims
-scripts/pm-collab.sh unclaim agent-a T-0001
+scripts/pm-collab.sh unclaim T-0001
 ```
 
 Windows (PowerShell):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 init
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 claim agent-a T-0001 "API work"
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 run agent-a -- move T-0001 in-progress
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 run agent-a -- criterion-check T-0001 1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 run agent-a -- done T-0001 "src\api\auth.ts" "tests passed"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 run move T-0001 in-progress
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 run criterion-check T-0001 1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 run done T-0001 "src\api\auth.ts" "tests passed"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 claims
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 unclaim agent-a T-0001
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\pm-collab.ps1 unclaim T-0001
 ```
 
 Windows (CMD wrapper):
 
 ```cmd
 scripts\pm-collab.cmd init
-scripts\pm-collab.cmd claim agent-a T-0001 "API work"
-scripts\pm-collab.cmd run agent-a -- move T-0001 in-progress
-scripts\pm-collab.cmd run agent-a -- criterion-check T-0001 1
-scripts\pm-collab.cmd run agent-a -- done T-0001 "src\api\auth.ts" "tests passed"
+scripts\pm-collab.cmd run move T-0001 in-progress
+scripts\pm-collab.cmd run criterion-check T-0001 1
+scripts\pm-collab.cmd run done T-0001 "src\api\auth.ts" "tests passed"
 scripts\pm-collab.cmd claims
-scripts\pm-collab.cmd unclaim agent-a T-0001
+scripts\pm-collab.cmd unclaim T-0001
 ```
 
 ## States
@@ -164,10 +168,10 @@ scripts\pm-collab.cmd unclaim agent-a T-0001
 ## Recommended Workflow (Multi-Agent, No Git)
 
 1. Initialize with `scripts/pm-collab.sh init` or `scripts\pm-collab.cmd init`.
-2. Each agent claims one task before modifying it.
-3. Each agent performs write operations through `scripts/pm-collab.sh run <agent> -- ...` or `scripts\pm-collab.cmd run <agent> -- ...`.
+2. Each agent performs write operations through `scripts/pm-collab.sh run ...` or `scripts\pm-collab.cmd run ...`.
+3. Wrapper auto-resolves agent identity and auto-claims task IDs when needed.
 4. Keep tasks exclusive by claim owner to avoid duplicate work.
-5. Complete with `done` (claim is auto-released) or manually `unclaim`.
+5. Complete with `done` (claim is auto-released) or `unclaim`.
 
 ## Why This Saves Context
 

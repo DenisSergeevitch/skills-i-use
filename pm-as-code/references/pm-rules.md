@@ -25,7 +25,9 @@
 - Keep `status.md` alive by re-rendering it after task completion.
 - Keep Pulse Log append-only. Never delete or rewrite prior entries.
 - Resolve uncertainty by recording updates in docs, not by chat memory.
-- Route all state writes through `scripts/pm-ticket.*` (single-agent) or `scripts/pm-collab.*` (multi-agent).
+- Route all state writes through `scripts/pm-collab.*`.
+- Use `pm-collab run <pm-ticket command...>`; it auto-resolves agent identity and auto-claims task IDs when needed.
+- Agent identity resolution order: `PM_AGENT` -> `CODEX_THREAD_ID` -> `CLAUDE_SESSION_ID` -> host fallback.
 
 ## Canon and Scope
 
@@ -52,7 +54,7 @@ Keep counters in `status.md`:
 - Optional: `Next Risk ID: RISK-xx`
 
 Issue IDs strictly:
-1. Use `scripts/pm-ticket.* next-id` or `new` to allocate from counter.
+1. Use `scripts/pm-collab.* run next-id` or `run new ...` to allocate from counter.
 2. Persist counter updates via script command.
 3. Render `status.md` from ledger after changes.
 
@@ -102,7 +104,7 @@ No exceptions.
 Start of session:
 1. Read `status.md` first.
 2. Confirm objective clarity, `Now` accuracy, and at least one active task ID.
-3. Ensure scope is initialized via `scripts/pm-ticket.* init`.
+3. Ensure scope is initialized via `scripts/pm-collab.* init`.
 4. If missing, create new task, add acceptance criteria, and place in `Now` or `Next` via script command.
 
 While working:
@@ -143,8 +145,8 @@ Rules:
   - `EVIDENCE_TAIL` (default 50)
   - `PULSE_TAIL` (default 30)
 - Use scope selection (`--scope` or `PM_SCOPE`) to isolate teams/swarm lanes.
-- Use `scripts/pm-ticket.sh` (Bash) or `scripts/pm-ticket.ps1` / `scripts/pm-ticket.cmd` (Windows) for all ledger operations to keep format stable.
-- For multi-agent locking, use `scripts/pm-collab.sh` (Bash) or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd` (Windows).
+- Use `scripts/pm-collab.sh` (Bash) or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd` (Windows) as the default operation path.
+- Keep `scripts/pm-ticket.*` for read-only/status operations and maintenance.
 - Generated snapshots must not be hand-edited; use ticket/collab scripts and re-render.
 
 ## Concurrency Policy
