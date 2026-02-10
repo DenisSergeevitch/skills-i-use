@@ -21,6 +21,8 @@ description: "Strict Markdown project management with status.md as the canonical
 - Use `pm-collab run <pm-ticket command...>`; it auto-resolves agent identity and auto-claims task IDs when needed.
 - Agent identity resolution order: `PM_AGENT` -> `CODEX_THREAD_ID` -> `CLAUDE_SESSION_ID` -> host fallback.
 - Use `pm-ticket.*` directly only for read-only/status commands or maintenance.
+- Empty state is not a blocker: if `status.md`/`.pm` do not exist yet, run `pm-collab ... init` and continue.
+- If repo-local wrappers are missing, invoke installed skill scripts directly (for example from `~/.codex/skills/pm-as-code/scripts/` or `~/.claude/skills/pm-as-code/scripts/`).
 
 ## Done Gate
 
@@ -34,7 +36,7 @@ A task is done only when all are true:
 ## Session Loop
 
 1. Read `status.md`.
-2. Ensure scope is initialized (`pm-collab ... init`) and select scope (`--scope` or `PM_SCOPE`).
+2. Select scope (`--scope` or `PM_SCOPE`) and ensure initialization (`pm-collab ... init` or automatic bootstrap on first `pm-collab run` mutation).
 3. Execute one active task ID (prefer `Now`) with `pm-collab run ...`.
 4. If new work appears, create a new task ID immediately via `pm-collab run new ...`.
 5. If blocked, move task to `Blocked` with explicit blocker text via `pm-collab run move ...`.

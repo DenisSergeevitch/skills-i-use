@@ -303,11 +303,14 @@ append_pulse() {
   printf '%s|%s|%s|%s\n' "$(now_ts)" "$task_id" "$event" "$details" >>"$PULSE_FILE"
 }
 
-ensure_pm_initialized() {
-  if [[ ! -f "$TICKETS_FILE" ]]; then
-    echo "error: scope '$SCOPE' not initialized. Run: scripts/pm-collab.sh --scope $SCOPE init" >&2
-    exit 1
+ensure_pm_initialized_or_bootstrap() {
+  local reason="${1:-auto}"
+  if [[ -f "$TICKETS_FILE" ]]; then
+    return
   fi
+  invoke_pm_ticket init
+  ensure_claims_file
+  append_pulse "SYSTEM" "COLLAB_AUTO_INIT" "auto bootstrap ($reason, scope=$SCOPE)"
 }
 
 ensure_claims_file() {
@@ -416,7 +419,7 @@ cmd_claim() {
 
   note="$(sanitize "${3:-}")"
   acquire_lock "$agent"
-  ensure_pm_initialized
+  ensure_pm_initialized_or_bootstrap "claim"
   ensure_claims_file
 
   if ! ticket_exists "$task_id"; then
@@ -452,7 +455,7 @@ cmd_unclaim() {
   local owner
 
   acquire_lock "$agent"
-  ensure_pm_initialized
+  ensure_pm_initialized_or_bootstrap "unclaim"
   ensure_claims_file
 
   owner="$(claim_owner "$task_id" || true)"
@@ -472,7 +475,10 @@ cmd_unclaim() {
 }
 
 cmd_claims() {
-  ensure_pm_initialized
+  if [[ ! -f "$TICKETS_FILE" ]]; then
+    echo "(none)"
+    return
+  fi
   ensure_claims_file
   awk -F'\t' '
     NR == 1 { next }
@@ -548,7 +554,7 @@ cmd_run() {
 
   acquire_lock "$agent"
   if [[ "$pm_cmd" != "init" ]]; then
-    ensure_pm_initialized
+    ensure_pm_initialized_or_bootstrap "run $pm_cmd"
     ensure_claims_file
   fi
 
@@ -596,10 +602,10 @@ main() {
         exit 1
       fi
       if looks_like_task_id "${1:-}"; then
-        cmd_claim "$(default_agent_name)" "$1" "${2:-}"
+        cmd_claim "$(default_agent_name)" "$1" "${*:2}"
       else
         [[ $# -lt 2 ]] && { usage; exit 1; }
-        cmd_claim "$1" "$2" "${3:-}"
+        cmd_claim "$1" "$2" "${*:3}"
       fi
       ;;
     unclaim)

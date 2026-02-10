@@ -109,6 +109,14 @@ function Parse-GlobalOptions([string[]]$InputArgs) {
     return @($remaining.ToArray())
 }
 
+function Join-From([string[]]$Items, [int]$StartIndex) {
+    if ($null -eq $Items -or $Items.Count -le $StartIndex) {
+        return ""
+    }
+    $slice = @($Items[$StartIndex..($Items.Count - 1)])
+    return ($slice -join " ")
+}
+
 function Set-ScopePaths {
     $script:PMDir = Join-Path $PMRoot ("scopes/" + $script:Scope)
     $script:MetaFile = Join-Path $script:PMDir "meta.env"
@@ -935,12 +943,12 @@ try {
         }
         "move" {
             if ($rest.Count -lt 2) { throw "error: move requires <id> and <state>" }
-            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
+            $note = Join-From $rest 2
             Cmd-Move $rest[0] $rest[1] $note
         }
         "criterion-add" {
             if ($rest.Count -lt 2) { throw "error: criterion-add requires <id> and <criterion>" }
-            Cmd-CriterionAdd $rest[0] $rest[1]
+            Cmd-CriterionAdd $rest[0] (Join-From $rest 1)
         }
         "criterion-check" {
             if ($rest.Count -lt 2) { throw "error: criterion-check requires <id> and <index>" }
@@ -948,12 +956,12 @@ try {
         }
         "evidence" {
             if ($rest.Count -lt 2) { throw "error: evidence requires <id> and <path-or-link>" }
-            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
+            $note = Join-From $rest 2
             Cmd-Evidence $rest[0] $rest[1] $note
         }
         "done" {
             if ($rest.Count -lt 2) { throw "error: done requires <id> and <path-or-link>" }
-            $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
+            $note = Join-From $rest 2
             Cmd-Done $rest[0] $rest[1] $note
         }
         "list" {

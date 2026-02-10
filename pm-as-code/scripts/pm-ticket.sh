@@ -879,11 +879,11 @@ main() {
       ;;
     move)
       [[ $# -lt 2 ]] && { usage; exit 1; }
-      cmd_move "$1" "$2" "${3:-}"
+      cmd_move "$1" "$2" "${*:3}"
       ;;
     criterion-add)
       [[ $# -lt 2 ]] && { usage; exit 1; }
-      cmd_criterion_add "$1" "$2"
+      cmd_criterion_add "$1" "${*:2}"
       ;;
     criterion-check)
       [[ $# -lt 2 ]] && { usage; exit 1; }
@@ -891,11 +891,11 @@ main() {
       ;;
     evidence)
       [[ $# -lt 2 ]] && { usage; exit 1; }
-      cmd_evidence "$1" "$2" "${3:-}"
+      cmd_evidence "$1" "$2" "${*:3}"
       ;;
     done)
       [[ $# -lt 2 ]] && { usage; exit 1; }
-      cmd_done "$1" "$2" "${3:-}"
+      cmd_done "$1" "$2" "${*:3}"
       ;;
     list)
       if [[ $# -gt 0 ]]; then

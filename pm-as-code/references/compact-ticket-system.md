@@ -3,6 +3,14 @@
 Use this as the default write path for all project updates.
 Read `status.md`, but never edit it manually.
 
+Empty-state behavior:
+- Missing `status.md`/`.pm` is expected in new repos.
+- Run `scripts/pm-collab.* init` to bootstrap, or run `scripts/pm-collab.* run ...` and wrappers auto-bootstrap before mutation.
+
+Text argument safety:
+- For `criterion-add`, and note fields in `move` / `evidence` / `done`, trailing words are auto-joined.
+- You can run without wrapping those text values in quotes when needed.
+
 ## What It Stores
 
 - `.pm/scopes/<scope>/meta.env`: counters and render settings.
@@ -33,6 +41,8 @@ Agent identity for `pm-collab run` resolves in this order:
 - `CODEX_THREAD_ID` (Codex sessions)
 - `CLAUDE_SESSION_ID` (Claude sessions)
 - fallback host identity (`user@host:<parent-pid>`)
+
+If repo-local wrappers are missing, run installed skill scripts directly (for example `~/.codex/skills/pm-as-code/scripts/pm-collab.sh`).
 
 Rendering behavior:
 

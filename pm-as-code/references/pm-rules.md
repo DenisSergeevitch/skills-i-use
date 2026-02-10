@@ -28,6 +28,8 @@
 - Route all state writes through `scripts/pm-collab.*`.
 - Use `pm-collab run <pm-ticket command...>`; it auto-resolves agent identity and auto-claims task IDs when needed.
 - Agent identity resolution order: `PM_AGENT` -> `CODEX_THREAD_ID` -> `CLAUDE_SESSION_ID` -> host fallback.
+- Treat empty state as normal: if `status.md`/`.pm` are missing, bootstrap with `scripts/pm-collab.* init` and continue.
+- If repo-local wrappers are absent, invoke installed skill scripts directly from skill install path.
 
 ## Canon and Scope
 
@@ -104,7 +106,7 @@ No exceptions.
 Start of session:
 1. Read `status.md` first.
 2. Confirm objective clarity, `Now` accuracy, and at least one active task ID.
-3. Ensure scope is initialized via `scripts/pm-collab.* init`.
+3. Ensure scope is initialized via `scripts/pm-collab.* init` or let first `scripts/pm-collab.* run ...` mutation auto-bootstrap.
 4. If missing, create new task, add acceptance criteria, and place in `Now` or `Next` via script command.
 
 While working:

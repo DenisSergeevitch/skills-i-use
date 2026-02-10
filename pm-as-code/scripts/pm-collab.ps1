@@ -145,6 +145,14 @@ function Parse-GlobalOptions([string[]]$InputArgs) {
     return @($remaining.ToArray())
 }
 
+function Join-From([string[]]$Items, [int]$StartIndex) {
+    if ($null -eq $Items -or $Items.Count -le $StartIndex) {
+        return ""
+    }
+    $slice = @($Items[$StartIndex..($Items.Count - 1)])
+    return ($slice -join " ")
+}
+
 function Set-ScopePaths {
     $script:PMDir = Join-Path $PMRoot ("scopes/" + $script:Scope)
     $script:LockDir = Join-Path $script:PMDir ".collab-lock"
@@ -319,10 +327,13 @@ function Append-Pulse([string]$TaskId, [string]$Event, [string]$Details = "") {
     Add-Content -LiteralPath $script:PulseFile -Value "$(Get-NowTs)|$TaskId|$Event|$safeDetails"
 }
 
-function Ensure-PMInitialized {
-    if (-not (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf)) {
-        throw "error: scope '$script:Scope' not initialized. Run: scripts/pm-collab.ps1 --scope $script:Scope init"
+function Ensure-PMInitializedOrBootstrap([string]$Reason = "auto") {
+    if (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf) {
+        return
     }
+    Invoke-PMTicket @("init")
+    Ensure-ClaimsFile
+    Append-Pulse "SYSTEM" "COLLAB_AUTO_INIT" "auto bootstrap ($Reason, scope=$script:Scope)"
 }
 
 function Ensure-ClaimsFile {
@@ -520,7 +531,7 @@ function Cmd-Claim([string]$Agent, [string]$TaskId, [string]$Note = "") {
 
     Acquire-Lock $Agent
     try {
-        Ensure-PMInitialized
+        Ensure-PMInitializedOrBootstrap "claim"
         Ensure-ClaimsFile
 
         if (-not (Ticket-Exists $TaskId)) {
@@ -557,7 +568,7 @@ function Cmd-Claim([string]$Agent, [string]$TaskId, [string]$Note = "") {
 function Cmd-Unclaim([string]$Agent, [string]$TaskId) {
     Acquire-Lock $Agent
     try {
-        Ensure-PMInitialized
+        Ensure-PMInitializedOrBootstrap "unclaim"
         Ensure-ClaimsFile
 
         $owner = Claim-Owner $TaskId
@@ -578,7 +589,10 @@ function Cmd-Unclaim([string]$Agent, [string]$TaskId) {
 }
 
 function Cmd-Claims {
-    Ensure-PMInitialized
+    if (-not (Test-Path -LiteralPath $script:TicketsFile -PathType Leaf)) {
+        Write-Output "(none)"
+        return
+    }
     Ensure-ClaimsFile
     $rows = Read-Claims
     if ($rows.Count -eq 0) {
@@ -675,7 +689,7 @@ function Cmd-Run([string[]]$RunArgs) {
     Acquire-Lock $agent
     try {
         if ($pmCmd -ne "init") {
-            Ensure-PMInitialized
+            Ensure-PMInitializedOrBootstrap "run $pmCmd"
             Ensure-ClaimsFile
         }
 
@@ -725,11 +739,11 @@ try {
         "claim" {
             if ($rest.Count -lt 1) { throw "error: claim requires <task-id> or <agent> <task-id>" }
             if (Looks-LikeTaskId $rest[0]) {
-                $note = if ($rest.Count -ge 2) { $rest[1] } else { "" }
+                $note = Join-From $rest 1
                 Cmd-Claim (Get-DefaultAgentName) $rest[0] $note
             } else {
                 if ($rest.Count -lt 2) { throw "error: claim requires <agent> <task-id>" }
-                $note = if ($rest.Count -ge 3) { $rest[2] } else { "" }
+                $note = Join-From $rest 2
                 Cmd-Claim $rest[0] $rest[1] $note
             }
         }

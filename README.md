@@ -28,13 +28,15 @@ Execution path:
 - Default for all writes (single-agent and multi-agent): `scripts/pm-collab.sh` or `scripts/pm-collab.ps1` / `scripts/pm-collab.cmd`.
 - Use `pm-collab run <pm-ticket command...>`; it auto-resolves agent identity and auto-claims task IDs when needed.
 - Agent identity resolution order: `PM_AGENT` -> `CODEX_THREAD_ID` -> `CLAUDE_SESSION_ID` -> host fallback.
+- Empty state is auto-covered: missing `status.md`/`.pm` is bootstrapped by `pm-collab init` (or automatically on first `pm-collab run` mutation).
+- If repo-local wrappers are missing, call installed skill scripts directly from your skills path.
 - Use `pm-ticket.*` directly only for read-only/status operations or maintenance.
 - `status.md` is generated output; do not edit it manually.
 - Rendered status headers include a bloat metric (`BLOAT_TICKET_THRESHOLD`, default `50`) and print an OS-appropriate `pm-collab run` command once the threshold is reached.
 
 Typical flow:
 1. Read `status.md`.
-2. Initialize once with `pm-collab ... init`.
+2. Initialize once with `pm-collab ... init` (or rely on automatic bootstrap on first `pm-collab run` mutation).
 3. Work one active task ID at a time via `pm-collab run ...`.
 4. Let collab wrapper auto-render status and append Pulse history.
 
