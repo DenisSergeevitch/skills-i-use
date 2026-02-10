@@ -35,6 +35,18 @@ Typical flow:
 3. Update criteria, evidence, and state transitions as work progresses.
 4. Render/update status and append Pulse history.
 
+## Best Practice (Optional)
+
+Best practice for long-running work is to mention in your `AGENTS.md` or `CLAUDE.md` that the agent should use `pm-as-code` before each task execution. This is optional, but it improves consistency.
+
+Copy-paste prompt:
+
+```md
+Before executing each task, invoke and follow `$pm-as-code`.
+Use it to read current status, choose/update task IDs, and record completion evidence.
+This is recommended, not mandatory: skip for tiny one-off actions that do not affect project state.
+```
+
 ## Install Paths
 
 - Codex (macOS/Linux): `~/.codex/skills/pm-as-code`
